@@ -1,0 +1,12 @@
+[project]
+name = "cfd-taichi"
+version = "0.1.0"
+description = "CFD solvers using Taichi"
+requires-python = ">=3.10"
+dependencies = [
+    "taichi==1.7.4",
+    "numpy",
+    "matplotlib",
+    "imageio",
+    "tabulate",
+]

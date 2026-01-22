@@ -1,0 +1,27 @@
+# CFD Taichi - Git Ignore
+
+# 數據與輸出 (由用戶指定)
+output/
+output_*/
+archived/
+archieved/
+*.npy
+*.png
+*.gif
+
+# Python 環境與快取
+__pycache__/
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/
+*.pyc
+
+# 系統檔案
+.DS_Store
+Thumbs.db
+
+# 編輯器設定
+.vscode/
+.idea/
+.claude/
+.gemini/
