@@ -20,8 +20,11 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# 編輯器設定
+# 編輯器與 Agent 設定
 .vscode/
 .idea/
 .claude/
 .gemini/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
