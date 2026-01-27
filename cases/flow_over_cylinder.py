@@ -23,11 +23,12 @@ Why 這個 case?
 """
 
 import taichi as ti
+import numpy as np
 import argparse
 import time
 import os
 from core import LBMSolver, BoundaryConditions, Diagnostics
-from utils.geometry import create_circle_mask
+from utils.geometry import create_circle_mask_and_sdf
 
 
 def run_flow_over_cylinder(
@@ -39,7 +40,12 @@ def run_flow_over_cylinder(
     steps: int = 50000,
     interval: int = 1000,
     tol: float = 1e-5,
-    output_dir: str = "output_cylinder"
+    output_dir: str = "output_cylinder",
+    sidewall: str = "outflow",
+    outflow_type: str = "orlanski",
+    outlet_relaxation: float = 0.2,
+    vtk_output: bool = False,
+    collision_model: str = "mrt",
 ):
     """
     執行圓柱繞流模擬
@@ -54,10 +60,16 @@ def run_flow_over_cylinder(
         interval: 儲存間隔
         tol: 收斂容差
         output_dir: 輸出目錄
+        sidewall: 上下邊界類型
+            - 'outflow': 開放邊界（Neumann，模擬無限大空域）【推薦】
+            - 'freeslip': Free-Slip 壁面（模擬風洞側壁）
+        outflow_type: 出口邊界類型
+            - 'orlanski': 非反射出口（推薦）
+            - 'neumann': Neumann 零梯度出口
     """
-    print("="*70)
-    print(" "*20 + "FLOW OVER CYLINDER")
-    print("="*70)
+    print("=" * 70)
+    print(" " * 20 + "FLOW OVER CYLINDER")
+    print("=" * 70)
 
     # === 計算網格與幾何參數 ===
     nx = int(3.5 * res_y)  # 長寬比 3.5:1
@@ -82,22 +94,56 @@ def run_flow_over_cylinder(
         re=re,
         u_ref=u_in,
         length_scale=diameter,
-        cs=cs
+        cs=cs,
+        collision_model=collision_model,
     )
 
     # === 設定障礙物 ===
-    mask = create_circle_mask(nx, ny, center=(cx, cy), radius=radius)
-    solver.set_obstacle(mask)
+    mask, sdf = create_circle_mask_and_sdf(nx, ny, center=(cx, cy), radius=radius)
+    solver.set_obstacle(mask, sdf_array=sdf)
+    solver._correct_solid_velocity()
+
+    # === 勢流初始化（減少初始擾動）===
+    solver.init_potential_flow_cylinder(cx=cx, cy=cy, radius=radius)
 
     # === 設定邊界條件 ===
     bc = BoundaryConditions(solver)
-    bc.add_zou_he_velocity_inlet(u_in, location='left')
-    bc.add_zou_he_pressure_outlet(rho_out=1.0, location='right')
-    bc.add_free_slip_wall('top')
-    bc.add_free_slip_wall('bottom')
+
+    # 入口：固定速度
+    bc.add_velocity_inlet(u_in, location="left")
+
+    # 出口：根據 outflow_type 選擇
+    if outflow_type == "orlanski":
+        bc.add_stable_outlet(
+            rho_out=1.0,
+            location="right",
+            relaxation=outlet_relaxation,
+        )
+        print(f"  Outflow Type: Orlanski Outflow (relaxation={outlet_relaxation})")
+    elif outflow_type == "neumann":
+        bc.add_neumann_outflow(location="right")
+        print(f"  Outflow Type: Neumann (zero-gradient)")
+    else:
+        raise ValueError(f"Unknown outflow_type: {outflow_type}")
+
+    # 上下邊界：根據 sidewall 選擇
+    if sidewall == "outflow":
+        bc.add_neumann_outflow("top")
+        bc.add_neumann_outflow("bottom")
+        print(f"  Sidewall Type: Neumann Outflow (open domain)")
+    elif sidewall == "freeslip":
+        bc.add_free_slip_wall("top", mode="symmetric")
+        bc.add_free_slip_wall("bottom", mode="symmetric")
+        print(f"  Sidewall Type: Free-Slip (wind tunnel)")
+    else:
+        raise ValueError(f"Unknown sidewall type: {sidewall}")
+
+    # 施加初始邊界條件
+    solver.apply_boundary_conditions(solver.f)
+    solver.apply_boundary_conditions(solver.f_new)
 
     # === 診斷系統 ===
-    diag = Diagnostics(solver, output_dir=output_dir)
+    diag = Diagnostics(solver, output_dir=output_dir, output_vtk=vtk_output)
 
     # === 主迴圈 ===
     print(f"Reynolds Number: {re}")
@@ -109,16 +155,18 @@ def run_flow_over_cylinder(
     headers = diag.print_header(include_forces=True)
 
     global_start = time.time()
-    
-    # 記錄初始質量
+
+    # 記錄初始質量與能量
     solver._update_macro(solver.f)
     solver._update_diagnostics()
     solver.initial_mass[None] = solver.total_mass[None]
-    diag.save_data(0, additional_data={'cd': 0.0, 'cl': 0.0})
+    solver.initial_KE[None] = solver.total_KE[None]
+    diag.save_data(0, additional_data={"cd": 0.0, "cl": 0.0})
 
     # 模擬開始時間
     sim_start = time.time()
 
+    last_step = steps
     for step in range(1, steps + 1):
         f_src = solver.f if step % 2 == 1 else solver.f_new
         f_dst = solver.f_new if step % 2 == 1 else solver.f
@@ -135,27 +183,35 @@ def run_flow_over_cylinder(
             remaining_steps = steps - step
             eta_seconds = remaining_steps / speed if speed > 0 else 0.0
 
-            row = diag.print_step_info(step, speed, eta_seconds, include_forces=True)
+            row = diag.print_step_info(
+                step, speed, eta_seconds, include_forces=True, f_field=f_dst
+            )
+            cd, cl = diag.get_force_coefficients()
+            diag.record_forces(step, cd, cl)
 
             if step % 500 == 0:
                 diag.history.append(row)
 
+            # CFL 條件檢查（每 1000 步）
+            if step % 1000 == 0:
+                solver.check_cfl_condition(warn_only=True)
+
             if step % interval == 0:
-                cd, cl = diag.get_force_coefficients()
-                diag.save_data(step, additional_data={'cd': cd, 'cl': cl})
+                diag.save_data(step, additional_data={"cd": cd, "cl": cl})
 
             if diag.check_convergence(tol):
                 print(f"\n✅ Converged at step {step}")
                 diag.history.append(row)
+                last_step = step
                 if step % interval != 0:
-                    cd, cl = diag.get_force_coefficients()
-                    diag.save_data(step, additional_data={'cd': cd, 'cl': cl})
+                    diag.save_data(step, additional_data={"cd": cd, "cl": cl})
                 break
 
         elif step % interval == 0:
             solver._update_macro(f_dst)
             cd, cl = diag.get_force_coefficients()
-            diag.save_data(step, additional_data={'cd': cd, 'cl': cl})
+            diag.record_forces(step, cd, cl)
+            diag.save_data(step, additional_data={"cd": cd, "cl": cl})
 
     # === 總結 ===
     total_time = time.time() - global_start
@@ -163,15 +219,36 @@ def run_flow_over_cylinder(
 
     diag.print_summary(headers)
 
+    min_step = int(0.5 * last_step)
+    stats = diag.compute_force_stats(min_step=min_step)
+    st = diag.compute_strouhal(diameter=diameter, u_ref=u_in, min_step=min_step)
+    if stats["samples"] > 0:
+        print("\n--- DFG Benchmark Metrics ---")
+        print(f"Cd_mean   : {stats['cd_mean']:.4f}")
+        print(f"Cl_rms    : {stats['cl_rms']:.4f}")
+        print(f"Strouhal  : {st:.4f}")
+
     # 存儲歷史數據
     history_file = os.path.join(output_dir, "history.npy")
-    np.save(history_file, {
-        'headers': headers,
-        'data': diag.history,
-        'params': {
-            'res_y': res_y, 're': re, 'u_in': u_in, 'diameter': diameter, 'cs': cs
-        }
-    })
+    np.save(
+        history_file,
+        {
+            "headers": headers,
+            "data": diag.history,
+            "params": {
+                "res_y": res_y,
+                "re": re,
+                "u_in": u_in,
+                "diameter": diameter,
+                "cs": cs,
+            },
+            "dfg": {
+                "cd_mean": stats.get("cd_mean", 0.0),
+                "cl_rms": stats.get("cl_rms", 0.0),
+                "strouhal": st,
+            },
+        },
+    )
     print(f"📊 History saved to {history_file}")
 
     # === 物理結果 ===
@@ -193,15 +270,51 @@ def run_flow_over_cylinder(
 
 def main():
     parser = argparse.ArgumentParser(description="Flow Over Cylinder Simulation")
-    parser.add_argument('--res', type=int, default=128, help='Y resolution')
-    parser.add_argument('--re', type=float, default=150.0, help='Reynolds number')
-    parser.add_argument('--u_in', type=float, default=0.1, help='Inlet velocity')
-    parser.add_argument('--diameter', type=float, default=None, help='Cylinder diameter')
-    parser.add_argument('--cs', type=float, default=0.16, help='Smagorinsky constant')
-    parser.add_argument('--steps', type=int, default=50000, help='Total steps')
-    parser.add_argument('--interval', type=int, default=100, help='Save interval')
-    parser.add_argument('--tol', type=float, default=1e-5, help='Convergence tolerance')
-    parser.add_argument('--output', type=str, default='output_cylinder', help='Output directory')
+    parser.add_argument("--res", type=int, default=128, help="Y resolution")
+    parser.add_argument("--re", type=float, default=150.0, help="Reynolds number")
+    parser.add_argument("--u_in", type=float, default=0.1, help="Inlet velocity")
+    parser.add_argument(
+        "--diameter", type=float, default=None, help="Cylinder diameter"
+    )
+    parser.add_argument("--cs", type=float, default=0.16, help="Smagorinsky constant")
+    parser.add_argument("--steps", type=int, default=50000, help="Total steps")
+    parser.add_argument("--interval", type=int, default=100, help="Save interval")
+    parser.add_argument("--tol", type=float, default=1e-5, help="Convergence tolerance")
+    parser.add_argument(
+        "--output", type=str, default="output_cylinder", help="Output directory"
+    )
+    parser.add_argument(
+        "--sidewall",
+        type=str,
+        default="outflow",
+        choices=["outflow", "freeslip"],
+        help="Top/bottom boundary: outflow (open domain) or freeslip (wind tunnel)",
+    )
+    parser.add_argument(
+        "--outflow",
+        type=str,
+        default="orlanski",
+        choices=["orlanski", "neumann"],
+        help="Right outlet type: orlanski or neumann",
+    )
+    parser.add_argument(
+        "--outlet_relax",
+        type=float,
+        default=0.2,
+        help="Outlet relaxation factor (stable outlet)",
+    )
+    parser.add_argument(
+        "--vtk",
+        action="store_true",
+        help="Export VTK (.vti) alongside npy outputs",
+    )
+    parser.add_argument(
+        "--collision",
+        type=str,
+        default="mrt",
+        choices=["mrt", "bgk", "elbm", "emrt"],
+        help="Collision model: mrt, bgk, elbm, or emrt",
+    )
 
     args = parser.parse_args()
 
@@ -216,7 +329,12 @@ def main():
         steps=args.steps,
         interval=args.interval,
         tol=args.tol,
-        output_dir=args.output
+        output_dir=args.output,
+        sidewall=args.sidewall,
+        outflow_type=args.outflow,
+        outlet_relaxation=args.outlet_relax,
+        vtk_output=args.vtk,
+        collision_model=args.collision,
     )
 
 

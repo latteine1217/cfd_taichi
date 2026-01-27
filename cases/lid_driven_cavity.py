@@ -20,6 +20,7 @@ Why 這個 case?
 """
 
 import taichi as ti
+import numpy as np
 import argparse
 import time
 import os
@@ -35,7 +36,8 @@ def run_lid_driven_cavity(
     steps: int = 50000,
     interval: int = 1000,
     tol: float = 1e-5,
-    output_dir: str = "output_ldc"
+    output_dir: str = "output_ldc",
+    collision_model: str = "mrt",
 ):
     """
     執行 Lid-Driven Cavity 模擬
@@ -50,9 +52,9 @@ def run_lid_driven_cavity(
         tol: 收斂容差
         output_dir: 輸出目錄
     """
-    print("="*70)
-    print(" "*20 + "LID-DRIVEN CAVITY FLOW")
-    print("="*70)
+    print("=" * 70)
+    print(" " * 20 + "LID-DRIVEN CAVITY FLOW")
+    print("=" * 70)
 
     # === 初始化求解器 ===
     solver = LBMSolver(
@@ -61,18 +63,28 @@ def run_lid_driven_cavity(
         re=re,
         u_ref=lid_vel,
         length_scale=res,  # 特徵長度 = 腔體尺寸
-        cs=cs
+        cs=cs,
+        collision_model=collision_model,
     )
 
     # === 設定邊界條件 ===
     bc = BoundaryConditions(solver)
 
-    # 底部、左、右：No-Slip（通過 mask 或 Bounce-Back）
-    # 這裡我們不需要額外設定，因為預設就是固體邊界
+    # 底部、左、右：No-Slip 壁面（通過 Bounce-Back）
+    bc.add_no_slip_wall("bottom")
+    bc.add_no_slip_wall("left")
+    bc.add_no_slip_wall("right")
 
     # 上蓋：運動壁面（平滑速度 profile）
     u_wall_profile = create_lid_velocity_profile(res, lid_vel)
-    bc.add_moving_wall(u_wall_profile, location='top')
+    bc.add_moving_wall(u_wall_profile, location="top")
+
+    # 角點處理：設為固體避免未定義行為
+    bc.set_corners_solid()
+
+    # 施加初始邊界條件
+    solver.apply_boundary_conditions(solver.f)
+    solver.apply_boundary_conditions(solver.f_new)
 
     # === 診斷系統 ===
     diag = Diagnostics(solver, output_dir=output_dir)
@@ -88,7 +100,7 @@ def run_lid_driven_cavity(
     headers = diag.print_header(include_forces=False)
 
     global_start = time.time()
-    
+
     # 記錄初始質量
     solver._update_macro(solver.f)
     solver._update_diagnostics()
@@ -118,7 +130,9 @@ def run_lid_driven_cavity(
             remaining_steps = steps - step
             eta_seconds = remaining_steps / speed if speed > 0 else 0.0
 
-            row = diag.print_step_info(step, speed, eta_seconds, include_forces=False)
+            row = diag.print_step_info(
+                step, speed, eta_seconds, include_forces=False, f_field=f_dst
+            )
 
             if step % 500 == 0:
                 diag.history.append(row)
@@ -143,29 +157,39 @@ def run_lid_driven_cavity(
     print(f"\n--- Simulation completed in {total_time:.2f} seconds ---")
 
     diag.print_summary(headers)
-    
+
     # 存儲歷史數據
     history_file = os.path.join(output_dir, "history.npy")
-    np.save(history_file, {
-        'headers': headers,
-        'data': diag.history,
-        'params': {
-            'res': res, 're': re, 'lid_vel': lid_vel, 'cs': cs
-        }
-    })
+    np.save(
+        history_file,
+        {
+            "headers": headers,
+            "data": diag.history,
+            "params": {"res": res, "re": re, "lid_vel": lid_vel, "cs": cs},
+        },
+    )
     print(f"📊 History saved to {history_file}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Lid-Driven Cavity Flow Simulation")
-    parser.add_argument('--res', type=int, default=256, help='Resolution (NxN grid)')
-    parser.add_argument('--re', type=float, default=1000.0, help='Reynolds number')
-    parser.add_argument('--lid_vel', type=float, default=0.1, help='Lid velocity')
-    parser.add_argument('--cs', type=float, default=0.16, help='Smagorinsky constant')
-    parser.add_argument('--steps', type=int, default=50000, help='Total steps')
-    parser.add_argument('--interval', type=int, default=100, help='Save interval')
-    parser.add_argument('--tol', type=float, default=1e-5, help='Convergence tolerance')
-    parser.add_argument('--output', type=str, default='output_ldc', help='Output directory')
+    parser.add_argument("--res", type=int, default=256, help="Resolution (NxN grid)")
+    parser.add_argument("--re", type=float, default=1000.0, help="Reynolds number")
+    parser.add_argument("--lid_vel", type=float, default=0.1, help="Lid velocity")
+    parser.add_argument("--cs", type=float, default=0.16, help="Smagorinsky constant")
+    parser.add_argument("--steps", type=int, default=50000, help="Total steps")
+    parser.add_argument("--interval", type=int, default=100, help="Save interval")
+    parser.add_argument("--tol", type=float, default=1e-5, help="Convergence tolerance")
+    parser.add_argument(
+        "--output", type=str, default="output_ldc", help="Output directory"
+    )
+    parser.add_argument(
+        "--collision",
+        type=str,
+        default="mrt",
+        choices=["mrt", "bgk", "elbm", "emrt"],
+        help="Collision model: mrt, bgk, elbm, or emrt",
+    )
 
     args = parser.parse_args()
 
@@ -179,7 +203,8 @@ def main():
         steps=args.steps,
         interval=args.interval,
         tol=args.tol,
-        output_dir=args.output
+        output_dir=args.output,
+        collision_model=args.collision,
     )
 
 

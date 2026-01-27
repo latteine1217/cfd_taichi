@@ -5,6 +5,8 @@
 提供不同的 LBM 碰撞算子實作：
 - BGK (Single Relaxation Time)
 - MRT (Multiple Relaxation Time)
+- ELBM (Entropic LBM)
+- EMRT (Entropic MRT)
 - LES (Large Eddy Simulation) 湍流模型
 
 Why 需要這個模組?
@@ -21,7 +23,7 @@ class CollisionModels:
     """
     碰撞模型模組（預留擴展）
 
-    目前 MRT + Smagorinsky 已內建在 LBMSolver
+    目前 SRT(BGK) / MRT / ELBM / EMRT + Smagorinsky 已內建在 LBMSolver
     未來可擴展：
     - BGK (single relaxation time)
     - Regularized LBM

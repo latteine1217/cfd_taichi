@@ -22,8 +22,30 @@
 
 *   🏗️ **統一核心架構**: 單一 `LBMSolver` 核心透過模組化設計（BC, Collision, Diagnostics），完美支援所有模擬場景。
 *   🌪️ **進階物理模型**: 支援 **MRT-LBM** (Multiple-Relaxation-Time) 碰撞算子與 **Smagorinsky LES** (Large Eddy Simulation) 湍流模型。
+*   🧱 **物理嚴謹邊界條件**: 出口採用 **Orlanski 非反射外流**，Free-Slip 預設 **對稱延拓**，降低反射與剪切誤差。
 *   💨 **粒子煙線系統**: 內建並行粒子系統，支援同時追蹤 50 萬個流體粒子，重現真實風洞中的煙線（Smoke Lines）可視化。
 *   📊 **動態監控系統**: 具備即時殘差監控與質量守恆檢查，確保物理模擬的準確性。
+*   🧠 **可切換碰撞模型**: 支援 SRT(BGK) / MRT / ELBM / EMRT，便於穩定性與耗散比較。
+
+---
+
+## 🧪 實現重點（Implementation Highlights）
+
+*   **D2Q9 LBM 核心**: 單一 `LBMSolver` 管理碰撞、流傳、診斷與多案例共用流程。
+*   **碰撞算子**: MRT 為預設；BGK 用於基準；ELBM/EMRT 提供熵穩定保護（含限制器與正性保護）。
+*   **EMRT (Single-α)**: 先做 MRT，再以熵條件求解 α，將更新縮放到熵可接受範圍。
+*   **Ghost Cells**: 場變數採 `(nx+2, ny+2)`，計算域為 `[1..nx, 1..ny]`，避免越界分支。
+*   **邊界條件**: Orlanski 出口、Free‑Slip 對稱延拓、Bouzidi 插值 BB（曲面幾何）。
+*   **診斷指標**: `macro_res`, `KE`, `f_min`, `mass_error`, `total_mass` 等即時監控。
+*   **輸出格式**: `.npy` state + history；可選 `.vti` 供 ParaView 後處理。
+
+---
+
+## 🧩 Backend Notes（Metal）
+
+*   **Ghost Cells**: 內部場採用 `(nx+2, ny+2)`，物理域為 `[1..nx, 1..ny]`。若你直接用 `solver.rho.from_numpy` 或 `solver.u[...]`，請自行做 `+1` 偏移或先 padding。
+*   **Boundary Indices**: Metal 不支援 `ti.root.dynamic`，目前採固定大小索引緩衝（dense）。
+*   **Case 初始化**: 自行建立初始場時，請避免直接覆蓋 ghost layer；只填物理域即可。
 
 ---
 
@@ -38,6 +60,9 @@
 ### 3. 高升力機翼系統 (Multi-Element Airfoil)
 模擬商用飛機起降階段的複雜氣動力配置（縫翼 + 主翼 + 襟翼）。精確模擬 **Slot (引流縫隙)** 效應，搭配粒子系統直觀觀察升力產生的物理過程。
 
+### 4. Kelvin-Helmholtz 不穩定性
+上下不同密度層的剪切不穩定性，用於驗證界面渦卷與非定常流動發展。
+
 ---
 
 ## ⚙️ 安裝與執行
@@ -51,13 +76,24 @@ uv pip install taichi numpy matplotlib tabulate imageio
 ### 2. 執行模擬
 ```bash
 # 執行機翼模擬
-python run.py airfoil --res 256 --aoa 12 --re 1000 --steps 5000
+uv run python run.py airfoil --res 256 --aoa 12 --re 1000 --steps 5000
+```
+
+切換碰撞模型（EMRT）：
+```bash
+uv run python cases/flow_over_cylinder.py --res 128 --re 150 --collision emrt
+```
+
+若需輸出到 ParaView（VTK）：
+```bash
+# 圓柱繞流 + VTK 輸出
+uv run python cases/flow_over_cylinder.py --res 128 --re 150 --vtk
 ```
 
 ### 3. 數據可視化
 ```bash
 # 生成速度場圖片與 GIF 影片（附帶動態進度條）
-python utils/visualization.py output_airfoil --gif --type velocity
+uv run python utils/visualization.py output_airfoil --gif --type velocity
 ```
 
 ---
