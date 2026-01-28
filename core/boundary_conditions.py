@@ -63,6 +63,10 @@ class BoundaryConditions:
 
         # 儲存邊界條件參數
         self.u_inlet = ti.field(dtype=ti.f32, shape=())
+        self.u_inlet_perturb = ti.field(dtype=ti.f32, shape=())
+        self.u_inlet_omega = ti.field(dtype=ti.f32, shape=())
+        self.u_inlet_time = ti.field(dtype=ti.f32, shape=())
+        self.u_inlet_asym = ti.field(dtype=ti.f32, shape=())
         self.rho_outlet = ti.field(dtype=ti.f32, shape=())
         self.u_wall_field = ti.field(dtype=ti.f32, shape=self.nx)  # 用於 Moving Wall
         self.corner_extrapolation_enabled = False
@@ -89,9 +93,21 @@ class BoundaryConditions:
         self.u_outflow_bottom = ti.Vector.field(2, dtype=ti.f32, shape=self.nx)
         self.outflow_smooth_strength = ti.field(dtype=ti.f32, shape=())
         self._init_outflow_buffers()
+        self.u_inlet_perturb[None] = 0.0
+        self.u_inlet_omega[None] = 0.0
+        self.u_inlet_time[None] = 0.0
+        self.u_inlet_asym[None] = 0.0
+        self._inlet_time_enabled = False
 
     def add_velocity_inlet(
-        self, u_in: float, location: str = "left", mode: str = "zouhe"
+        self,
+        u_in: float,
+        location: str = "left",
+        mode: str = "zouhe",
+        epsilon: float = 0.02,
+        omega=None,
+        strouhal: float = 0.2,
+        asymmetry: float = 0.0,
     ):
         """
         添加固定速度入口邊界
@@ -105,8 +121,22 @@ class BoundaryConditions:
             u_in: 入口速度 (lattice units)
             location: 'left', 'right', 'top', 'bottom'
             mode: 'zouhe' 或 'neq'（Guo 非平衡外推）
+            epsilon: 時間性正弦擾動幅度（相對值，1%~5%）
+            omega: 擾動角頻率（rad/step），None 時用 Strouhal 估算
+            strouhal: Strouhal 數（用於估算 omega）
+            asymmetry: 入口速度上下非對稱擾動幅度（相對 u_in）
         """
         self.u_inlet[None] = u_in
+        self.u_inlet_perturb[None] = epsilon
+        if omega is None:
+            omega = 2.0 * np.pi * strouhal * u_in / self.solver.L_char
+        self.u_inlet_omega[None] = omega
+        self.u_inlet_asym[None] = asymmetry
+        if not self._inlet_time_enabled:
+            self.solver.add_boundary_condition(
+                self._advance_inlet_time, "Inlet Time Advance"
+            )
+            self._inlet_time_enabled = True
 
         if mode not in {"zouhe", "neq"}:
             raise ValueError(f"Invalid inlet mode: {mode}")
@@ -187,7 +217,7 @@ class BoundaryConditions:
         self,
         rho_out: float = 1.0,
         location: str = "right",
-        relaxation: float = 0.2,
+        relaxation: float = 0.02,
     ):
         """
         高雷諾數穩定出口（Orlanski + Weak Relaxation）
@@ -508,8 +538,8 @@ class BoundaryConditions:
 
     @ti.kernel
     def _init_mass_correction(self):
-        self.mass_correction_interval[None] = 200
-        self.mass_correction_strength[None] = 0.1
+        self.mass_correction_interval[None] = 0
+        self.mass_correction_strength[None] = 0.0
         self.mass_correction_counter[None] = 0
 
     def add_orlanski_outflow(
@@ -621,7 +651,23 @@ class BoundaryConditions:
         self.outflow_relax_left[None] = 0.02
         self.outflow_rho_target_right[None] = 1.0
         self.outflow_rho_target_left[None] = 1.0
-        self.outflow_smooth_strength[None] = 0.2
+        self.outflow_smooth_strength[None] = 0.02
+
+    @ti.kernel
+    def _advance_inlet_time(self, f_dst: ti.template()):
+        self.u_inlet_time[None] += 1.0
+
+    @ti.func
+    def _current_inlet_speed(self, j: ti.i32):
+        t = self.u_inlet_time[None]
+        base_u = self.u_inlet[None]
+        omega = self.u_inlet_omega[None]
+        epsilon = self.u_inlet_perturb[None]
+        base = base_u * (1.0 + epsilon * ti.sin(omega * t))
+        denom = ti.max(ti.cast(self.ny - 1, ti.f32), 1.0)
+        y_norm = ti.cast(j, ti.f32) / denom
+        asym = base_u * self.u_inlet_asym[None] * (y_norm - 0.5)
+        return base + asym
 
     @ti.kernel
     def _orlanski_outflow_right(self, f_dst: ti.template()):
@@ -745,14 +791,13 @@ class BoundaryConditions:
         for j in range(self.ny):
             jg = j + 1
             if self.solver.mask[1, jg] == 0:  # 類型 A：流體邊界
+                u_in = self._current_inlet_speed(j)
                 f0 = f_dst[1, jg][0]
                 f2 = f_dst[1, jg][2]
                 f3 = f_dst[1, jg][3]
                 f4 = f_dst[1, jg][4]
                 f6 = f_dst[1, jg][6]
                 f7 = f_dst[1, jg][7]
-
-                u_in = self.u_inlet[None]
                 rho_in = (f0 + f2 + f4 + 2.0 * (f3 + f6 + f7)) / (1.0 - u_in)
 
                 # 重建未知分佈函數
@@ -772,8 +817,9 @@ class BoundaryConditions:
         for j in range(self.ny):
             jg = j + 1
             if self.solver.mask[1, jg] == 0:
+                u_in = self._current_inlet_speed(j)
                 rho_i, u_i = self._compute_macro_from_f(f_dst[2, jg])
-                u_b = ti.Vector([self.u_inlet[None], 0.0])
+                u_b = ti.Vector([u_in, 0.0])
                 rho_b = rho_i
 
                 feq_b = self._compute_equilibrium(rho_b, u_b)
@@ -788,14 +834,13 @@ class BoundaryConditions:
         for j in range(self.ny):
             jg = j + 1
             if self.solver.mask[self.nx, jg] == 0:
+                u_in = -self._current_inlet_speed(j)
                 f0 = f_dst[self.nx, jg][0]
                 f1 = f_dst[self.nx, jg][1]
                 f2 = f_dst[self.nx, jg][2]
                 f4 = f_dst[self.nx, jg][4]
                 f5 = f_dst[self.nx, jg][5]
                 f8 = f_dst[self.nx, jg][8]
-
-                u_in = -self.u_inlet[None]  # 向左流入
                 rho_in = (f0 + f2 + f4 + 2.0 * (f1 + f5 + f8)) / (1.0 + u_in)
 
                 f_dst[self.nx, jg][3] = f1 - (2.0 / 3.0) * rho_in * u_in
@@ -812,8 +857,9 @@ class BoundaryConditions:
         for j in range(self.ny):
             jg = j + 1
             if self.solver.mask[self.nx, jg] == 0:
+                u_in = self._current_inlet_speed(j)
                 rho_i, u_i = self._compute_macro_from_f(f_dst[self.nx - 1, jg])
-                u_b = ti.Vector([-self.u_inlet[None], 0.0])
+                u_b = ti.Vector([-u_in, 0.0])
                 rho_b = rho_i
 
                 feq_b = self._compute_equilibrium(rho_b, u_b)

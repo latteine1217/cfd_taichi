@@ -36,7 +36,9 @@ class Visualizer:
         aspect_ratio = ny / nx
         fig_width = 12
         fig_height = max(fig_width * aspect_ratio * 1.2, 4)
-        return plt.subplots(figsize=(fig_width, fig_height))
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+        ax.set_aspect("equal", adjustable="box")
+        return fig, ax
 
     def plot_velocity(
         self,
@@ -59,7 +61,7 @@ class Visualizer:
             cmap="turbo",
             interpolation="bilinear",
             extent=[0, nx, 0, ny],
-            aspect="auto",
+            aspect="equal",
         )
 
         if particles is not None and len(particles) > 0:
@@ -106,7 +108,7 @@ class Visualizer:
             vmax=limit,
             interpolation="bilinear",
             extent=[0, nx, 0, ny],
-            aspect="auto",
+            aspect="equal",
         )
         ax.set_title(title)
         plt.colorbar(im, ax=ax, label="Vorticity", fraction=0.046, pad=0.04)
@@ -153,7 +155,7 @@ class Visualizer:
             vmax=vmax,
             interpolation="bilinear",
             extent=[0, nx, 0, ny],
-            aspect="auto",
+            aspect="equal",
         )
         ax.set_title(title)
         plt.colorbar(im, ax=ax, label="nu_sgs", fraction=0.046, pad=0.04, format="%.2e")
@@ -169,7 +171,7 @@ class Visualizer:
             cmap="turbo",
             interpolation="bilinear",
             extent=[0, nx, 0, ny],
-            aspect="auto",
+            aspect="equal",
             vmin=vmin,
             vmax=vmax,
         )
@@ -194,7 +196,7 @@ class Visualizer:
             cmap="RdBu_r",
             interpolation="bilinear",
             extent=[0, nx, 0, ny],
-            aspect="auto",
+            aspect="equal",
             vmin=vmin,
             vmax=vmax,
         )
@@ -214,7 +216,7 @@ class Visualizer:
             cmap="YlOrRd",
             interpolation="bilinear",
             extent=[0, nx, 0, ny],
-            aspect="auto",
+            aspect="equal",
             vmin=vmin,
             vmax=vmax,
         )

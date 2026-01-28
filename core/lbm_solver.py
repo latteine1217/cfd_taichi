@@ -47,6 +47,7 @@ class LBMSolver:
         enable_sponge: bool = False,
         sponge_strength: float = 0.5,
         collision_model: str = "mrt",
+        dynamic_cs_max: float = 0.23,
     ):
         """
         Args:
@@ -55,10 +56,11 @@ class LBMSolver:
             re: Reynolds 數 (U*L/ν)
             u_ref: 參考速度 (lattice units)
             length_scale: 特徵長度，若為 None 則使用 ny/9.0
-            cs: Smagorinsky 常數 (0 表示不使用 LES)
+            cs: LES 啟用旗標 (<=0 表示不使用 LES；動態 Smagorinsky 會自動估計)
             enable_sponge: 是否啟用海綿層（用於高 Re 數穩定性）
             sponge_strength: 海綿層最大阻尼係數（0-1，推薦 0.5）
             collision_model: "mrt" | "bgk" | "elbm"
+            dynamic_cs_max: 動態 Smagorinsky 的上限 (建議 0.2~0.25)
         """
         self.nx = nx
         self.ny = ny
@@ -67,6 +69,7 @@ class LBMSolver:
         self.re = re
         self.u_ref = u_ref
         self.cs = cs
+        self.dynamic_cs_max = dynamic_cs_max
         self.enable_sponge = enable_sponge
         self.sponge_strength = sponge_strength
 
@@ -111,6 +114,12 @@ class LBMSolver:
         self.nu_sgs = ti.field(
             dtype=ti.f32, shape=(self.nx_g, self.ny_g)
         )  # Smagorinsky 渦黏度
+        self.nu_sgs_raw = ti.field(dtype=ti.f32, shape=(self.nx_g, self.ny_g))
+        self.u_bar = ti.Vector.field(2, dtype=ti.f32, shape=(self.nx_g, self.ny_g))
+        self.uu_bar = ti.Vector.field(3, dtype=ti.f32, shape=(self.nx_g, self.ny_g))
+        self.rho_bar = ti.field(dtype=ti.f32, shape=(self.nx_g, self.ny_g))
+        self.ru_bar = ti.Vector.field(2, dtype=ti.f32, shape=(self.nx_g, self.ny_g))
+        self.ruu_bar = ti.Vector.field(3, dtype=ti.f32, shape=(self.nx_g, self.ny_g))
 
         self.collision_model_id = ti.field(dtype=ti.i32, shape=())
 
@@ -417,15 +426,19 @@ class LBMSolver:
         # k=7,8 對應應力張量，使用黏度相關的 s_nu
         # 其他高階矩使用較大的 s_other (更快鬆弛，提高穩定性)
         s_nu = 1.0 / self.tau
-        s_other = 1.2
+
+        # Lallemand & Luo (2000) 常用鬆弛參數
+        s_e = 1.64
+        s_eps = 1.54
+        s_q = 1.2
 
         self.S[0] = 0.0  # 質量守恆（不鬆弛）
-        self.S[1] = s_other  # 能量相關
-        self.S[2] = s_other
+        self.S[1] = s_e  # 能量相關
+        self.S[2] = s_eps
         self.S[3] = 0.0  # 動量守恆（不鬆弛）
-        self.S[4] = s_other
+        self.S[4] = s_q
         self.S[5] = 0.0  # 動量守恆（不鬆弛）
-        self.S[6] = s_other
+        self.S[6] = s_q
         self.S[7] = s_nu  # 應力張量（黏度）
         self.S[8] = s_nu  # 應力張量（黏度）
 
@@ -931,10 +944,22 @@ class LBMSolver:
         nu_total = self.nu + self.nu_sgs[i, j]
         tau_eff = 3.0 * nu_total + 0.5
         s_nu = 1.0 / tau_eff
+        ratio = self.tau / tau_eff
+        s_e = ti.min(1.95, ti.max(0.0, self.S[1] * ratio))
+        s_eps = ti.min(1.95, ti.max(0.0, self.S[2] * ratio))
+        s_q = ti.min(1.95, ti.max(0.0, self.S[4] * ratio))
 
         m_star = ti.Vector([0.0] * 9)
         for k in ti.static(range(9)):
-            rate = s_nu if (k == 7 or k == 8) else self.S[k]
+            rate = self.S[k]
+            if k == 1:
+                rate = s_e
+            elif k == 2:
+                rate = s_eps
+            elif k == 4 or k == 6:
+                rate = s_q
+            elif k == 7 or k == 8:
+                rate = s_nu
             m_star[k] = m[k] - rate * (m[k] - meq[k])
 
         f_post = self.M_inv[None] @ m_star
@@ -990,10 +1015,22 @@ class LBMSolver:
         nu_total = self.nu + self.nu_sgs[i, j]
         tau_eff = 3.0 * nu_total + 0.5
         s_nu = 1.0 / tau_eff
+        ratio = self.tau / tau_eff
+        s_e = ti.min(1.95, ti.max(0.0, self.S[1] * ratio))
+        s_eps = ti.min(1.95, ti.max(0.0, self.S[2] * ratio))
+        s_q = ti.min(1.95, ti.max(0.0, self.S[4] * ratio))
 
         m_star = ti.Vector([0.0] * 9)
         for k in ti.static(range(9)):
-            rate = s_nu if (k == 7 or k == 8) else self.S[k]
+            rate = self.S[k]
+            if k == 1:
+                rate = s_e
+            elif k == 2:
+                rate = s_eps
+            elif k == 4 or k == 6:
+                rate = s_q
+            elif k == 7 or k == 8:
+                rate = s_nu
             m_star[k] = m[k] - rate * (m[k] - meq[k])
 
         f_mrt = self.M_inv[None] @ m_star
@@ -1193,70 +1230,226 @@ class LBMSolver:
             else:  # 固體節點：速度為零
                 self.u[ig, jg] = ti.Vector([0.0, 0.0])
 
-    @ti.kernel
     def _update_smagorinsky_viscosity(self):
         """
-        使用速度梯度計算 Smagorinsky 渦黏度
+        動態 Smagorinsky 渦黏度 (Germano-Lilly)
 
-        Why gradient-based?
-        - 直接使用應變率張量 |S|，物理意義更清楚
-        - 避免非平衡矩量的噪聲敏感性
+        Why dynamic?
+        - 自動估計 Cs，避免手動調參
+        - 對不同 Re/幾何更穩健
         """
-        ti.block_local(self.u)
-        ti.block_local(self.mask)
+        if self.cs <= 0.0:
+            self._clear_sgs_viscosity()
+            return
+
+        self._compute_filtered_velocity()
+        self._update_dynamic_smagorinsky()
+        self._smooth_sgs_viscosity()
+
+    @ti.kernel
+    def _clear_sgs_viscosity(self):
+        for i, j in ti.ndrange(self.nx, self.ny):
+            self.nu_sgs[i + 1, j + 1] = 0.0
+            self.nu_sgs_raw[i + 1, j + 1] = 0.0
+            self.rho_bar[i + 1, j + 1] = 0.0
+            self.ru_bar[i + 1, j + 1] = ti.Vector([0.0, 0.0])
+            self.ruu_bar[i + 1, j + 1] = ti.Vector([0.0, 0.0, 0.0])
+
+    @ti.func
+    def _strain_tensor(self, u_field: ti.template(), i: ti.i32, j: ti.i32):
+        i_minus = ti.max(i - 1, 0)
+        i_plus = ti.min(i + 1, self.nx - 1)
+        j_minus = ti.max(j - 1, 0)
+        j_plus = ti.min(j + 1, self.ny - 1)
+
+        ig = i + 1
+        jg = j + 1
+        ig_minus = i_minus + 1
+        ig_plus = i_plus + 1
+        jg_minus = j_minus + 1
+        jg_plus = j_plus + 1
+
+        u_c = u_field[ig, jg]
+        u_ip = ti.select(self.mask[ig_plus, jg] == 1, u_c, u_field[ig_plus, jg])
+        u_im = ti.select(self.mask[ig_minus, jg] == 1, u_c, u_field[ig_minus, jg])
+        u_jp = ti.select(self.mask[ig, jg_plus] == 1, u_c, u_field[ig, jg_plus])
+        u_jm = ti.select(self.mask[ig, jg_minus] == 1, u_c, u_field[ig, jg_minus])
+
+        inv_2dx = 0.5 / ti.max(self.grid_spacing, 1e-12)
+        du_dx = (u_ip[0] - u_im[0]) * inv_2dx
+        dv_dx = (u_ip[1] - u_im[1]) * inv_2dx
+        du_dy = (u_jp[0] - u_jm[0]) * inv_2dx
+        dv_dy = (u_jp[1] - u_jm[1]) * inv_2dx
+
+        s_xx = du_dx
+        s_yy = dv_dy
+        s_xy = 0.5 * (du_dy + dv_dx)
+        return s_xx, s_xy, s_yy
+
+    @ti.func
+    def _near_solid(self, i: ti.i32, j: ti.i32):
+        near = 0
+        for di, dj in ti.static(ti.ndrange((-1, 2), (-1, 2))):
+            ii = ti.max(0, ti.min(self.nx - 1, i + di))
+            jj = ti.max(0, ti.min(self.ny - 1, j + dj))
+            if self.mask[ii + 1, jj + 1] == 1:
+                near = 1
+        return near
+
+    @ti.kernel
+    def _compute_filtered_velocity(self):
         for i, j in ti.ndrange(self.nx, self.ny):
             ig = i + 1
             jg = j + 1
-            mask_fluid = 1.0 - ti.cast(self.mask[ig, jg], ti.f32)
-            if ti.static(self.cs > 0.0):
-                border = ti.cast(
-                    (i < 3) or (i > self.nx - 4) or (j < 3) or (j > self.ny - 4),
-                    ti.f32,
-                )
-                if border > 0.5 or mask_fluid < 0.5:
-                    self.nu_sgs[ig, jg] = 0.0
-                    continue
-                    i_minus = ti.max(i - 1, 0)
-                    i_plus = ti.min(i + 1, self.nx - 1)
-                    j_minus = ti.max(j - 1, 0)
-                    j_plus = ti.min(j + 1, self.ny - 1)
-
-                    ig_minus = i_minus + 1
-                    ig_plus = i_plus + 1
-                    jg_minus = j_minus + 1
-                    jg_plus = j_plus + 1
-
-                    dx = ti.cast(i_plus - i_minus, ti.f32)
-                    dy = ti.cast(j_plus - j_minus, ti.f32)
-                    inv_dx = 1.0 / ti.max(dx, 1.0)
-                    inv_dy = 1.0 / ti.max(dy, 1.0)
-
-                    u_ip = self.u[ig_plus, jg]
-                    u_im = self.u[ig_minus, jg]
-                    u_jp = self.u[ig, jg_plus]
-                    u_jm = self.u[ig, jg_minus]
-
-                    u_ip = ti.select(self.mask[ig_plus, jg] == 1, self.u[ig, jg], u_ip)
-                    u_im = ti.select(self.mask[ig_minus, jg] == 1, self.u[ig, jg], u_im)
-                    u_jp = ti.select(self.mask[ig, jg_plus] == 1, self.u[ig, jg], u_jp)
-                    u_jm = ti.select(self.mask[ig, jg_minus] == 1, self.u[ig, jg], u_jm)
-
-                    du_dx = (u_ip[0] - u_im[0]) * inv_dx
-                    dv_dx = (u_ip[1] - u_im[1]) * inv_dx
-                    du_dy = (u_jp[0] - u_jm[0]) * inv_dy
-                    dv_dy = (u_jp[1] - u_jm[1]) * inv_dy
-
-                    s_xx = du_dx
-                    s_yy = dv_dy
-                    s_xy = 0.5 * (du_dy + dv_dx)
-                    s_mag = ti.sqrt(
-                        2.0 * (s_xx * s_xx + s_yy * s_yy + 2.0 * s_xy * s_xy)
+            if self.mask[ig, jg] == 0:
+                sum_rho = 0.0
+                sum_ru = ti.Vector([0.0, 0.0])
+                sum_ruu = ti.Vector([0.0, 0.0, 0.0])
+                u_center = self.u[ig, jg]
+                rho_center = self.rho[ig, jg]
+                for di, dj in ti.static(ti.ndrange((-1, 2), (-1, 2))):
+                    ii = ti.max(0, ti.min(self.nx - 1, i + di))
+                    jj = ti.max(0, ti.min(self.ny - 1, j + dj))
+                    iig = ii + 1
+                    jjg = jj + 1
+                    use_center = self.mask[iig, jjg] == 1
+                    u_val = ti.select(use_center, u_center, self.u[iig, jjg])
+                    rho_val = ti.select(use_center, rho_center, self.rho[iig, jjg])
+                    sum_rho += rho_val
+                    sum_ru += rho_val * u_val
+                    sum_ruu += rho_val * ti.Vector(
+                        [u_val[0] * u_val[0], u_val[0] * u_val[1], u_val[1] * u_val[1]]
                     )
 
-                    delta = self.grid_spacing
-                    self.nu_sgs[ig, jg] = (self.cs * delta) * (self.cs * delta) * s_mag
+                inv_n = 1.0 / 9.0
+                rho_bar = sum_rho * inv_n
+                self.rho_bar[ig, jg] = rho_bar
+                self.ru_bar[ig, jg] = sum_ru * inv_n
+                self.ruu_bar[ig, jg] = sum_ruu * inv_n
+                if rho_bar > 1e-12:
+                    self.u_bar[ig, jg] = self.ru_bar[ig, jg] / rho_bar
+                    self.uu_bar[ig, jg] = self.ruu_bar[ig, jg] / rho_bar
                 else:
+                    self.u_bar[ig, jg] = ti.Vector([0.0, 0.0])
+                    self.uu_bar[ig, jg] = ti.Vector([0.0, 0.0, 0.0])
+            else:
+                self.u_bar[ig, jg] = ti.Vector([0.0, 0.0])
+                self.uu_bar[ig, jg] = ti.Vector([0.0, 0.0, 0.0])
+                self.rho_bar[ig, jg] = 0.0
+                self.ru_bar[ig, jg] = ti.Vector([0.0, 0.0])
+                self.ruu_bar[ig, jg] = ti.Vector([0.0, 0.0, 0.0])
+
+    @ti.kernel
+    def _update_dynamic_smagorinsky(self):
+        alpha = 2.0
+        delta = self.grid_spacing
+        cs2_max = self.dynamic_cs_max * self.dynamic_cs_max
+        for i, j in ti.ndrange(self.nx, self.ny):
+            ig = i + 1
+            jg = j + 1
+            if self.mask[ig, jg] == 0:
+                border = (i < 2) or (i > self.nx - 3) or (j < 2) or (j > self.ny - 3)
+                if border or self._near_solid(i, j) == 1:
+                    self.nu_sgs_raw[ig, jg] = 0.0
+                    continue
+                s_xx, s_xy, s_yy = self._strain_tensor(self.u, i, j)
+                s_mag = ti.sqrt(2.0 * (s_xx * s_xx + s_yy * s_yy + 2.0 * s_xy * s_xy))
+
+                s_xx_bar, s_xy_bar, s_yy_bar = self._strain_tensor(self.u_bar, i, j)
+                s_mag_bar = ti.sqrt(
+                    2.0
+                    * (
+                        s_xx_bar * s_xx_bar
+                        + s_yy_bar * s_yy_bar
+                        + 2.0 * s_xy_bar * s_xy_bar
+                    )
+                )
+
+                sum_ss = ti.Vector([0.0, 0.0, 0.0])
+                for di, dj in ti.static(ti.ndrange((-1, 2), (-1, 2))):
+                    ii = ti.max(0, ti.min(self.nx - 1, i + di))
+                    jj = ti.max(0, ti.min(self.ny - 1, j + dj))
+                    sxx_n, sxy_n, syy_n = self._strain_tensor(self.u, ii, jj)
+                    s_mag_n = ti.sqrt(
+                        2.0 * (sxx_n * sxx_n + syy_n * syy_n + 2.0 * sxy_n * sxy_n)
+                    )
+                    sum_ss += ti.Vector(
+                        [s_mag_n * sxx_n, s_mag_n * sxy_n, s_mag_n * syy_n]
+                    )
+
+                ss_bar = sum_ss * (1.0 / 9.0)
+
+                u_bar = self.u_bar[ig, jg]
+                uu_bar = self.uu_bar[ig, jg]
+                L_xx = uu_bar[0] - u_bar[0] * u_bar[0]
+                L_xy = uu_bar[1] - u_bar[0] * u_bar[1]
+                L_yy = uu_bar[2] - u_bar[1] * u_bar[1]
+
+                m_xx = (
+                    2.0
+                    * delta
+                    * delta
+                    * (ss_bar[0] - alpha * alpha * s_mag_bar * s_xx_bar)
+                )
+                m_xy = (
+                    2.0
+                    * delta
+                    * delta
+                    * (ss_bar[1] - alpha * alpha * s_mag_bar * s_xy_bar)
+                )
+                m_yy = (
+                    2.0
+                    * delta
+                    * delta
+                    * (ss_bar[2] - alpha * alpha * s_mag_bar * s_yy_bar)
+                )
+
+                num = L_xx * m_xx + 2.0 * L_xy * m_xy + L_yy * m_yy
+                den = m_xx * m_xx + 2.0 * m_xy * m_xy + m_yy * m_yy + 1e-12
+
+                cs2 = ti.max(0.0, num / den)
+                cs2 = ti.min(cs2, cs2_max)
+
+                self.nu_sgs_raw[ig, jg] = cs2 * delta * delta * s_mag
+            else:
+                self.nu_sgs_raw[ig, jg] = 0.0
+
+    @ti.kernel
+    def _smooth_sgs_viscosity(self):
+        smooth_cs2 = 1
+        delta = self.grid_spacing
+        for i, j in ti.ndrange(self.nx, self.ny):
+            ig = i + 1
+            jg = j + 1
+            if self.mask[ig, jg] == 0:
+                border = (i < 2) or (i > self.nx - 3) or (j < 2) or (j > self.ny - 3)
+                if border or self._near_solid(i, j) == 1:
                     self.nu_sgs[ig, jg] = 0.0
+                else:
+                    sum_nu = 0.0
+                    sum_cs2 = 0.0
+                    for di, dj in ti.static(ti.ndrange((-1, 2), (-1, 2))):
+                        ii = ti.max(0, ti.min(self.nx - 1, i + di))
+                        jj = ti.max(0, ti.min(self.ny - 1, j + dj))
+                        nu_local = self.nu_sgs_raw[ii + 1, jj + 1]
+                        sum_nu += nu_local
+                        if smooth_cs2 == 1:
+                            sxx, sxy, syy = self._strain_tensor(self.u, ii, jj)
+                            s_mag = ti.sqrt(
+                                2.0 * (sxx * sxx + syy * syy + 2.0 * sxy * sxy)
+                            )
+                            denom = delta * delta * ti.max(s_mag, 1e-12)
+                            sum_cs2 += nu_local / denom
+                    if smooth_cs2 == 1:
+                        cs2 = ti.max(0.0, sum_cs2 * (1.0 / 9.0))
+                        cs2 = ti.min(cs2, self.dynamic_cs_max * self.dynamic_cs_max)
+                        sxx_c, sxy_c, syy_c = self._strain_tensor(self.u, i, j)
+                        s_mag_c = ti.sqrt(
+                            2.0 * (sxx_c * sxx_c + syy_c * syy_c + 2.0 * sxy_c * sxy_c)
+                        )
+                        self.nu_sgs[ig, jg] = cs2 * delta * delta * s_mag_c
+                    else:
+                        self.nu_sgs[ig, jg] = sum_nu * (1.0 / 9.0)
             else:
                 self.nu_sgs[ig, jg] = 0.0
 

@@ -149,18 +149,84 @@ class Diagnostics:
 
         return f_peak * diameter / u_ref
 
+    def compute_force_spectrum(
+        self,
+        min_step: int = 0,
+        max_peaks: int = 3,
+    ) -> List[Tuple[float, float]]:
+        """
+        計算 Cl 的頻譜主峰
+
+        Returns:
+            [(f_peak, amplitude), ...] 依 amplitude 由大到小排序
+        """
+        if not self.force_history:
+            return []
+
+        data = np.array(
+            [(s, cl) for s, _, cl in self.force_history if s >= min_step],
+            dtype=np.float64,
+        )
+        if data.shape[0] < 4:
+            return []
+
+        steps = data[:, 0]
+        cl = data[:, 1] - np.mean(data[:, 1])
+        dt = float(np.mean(np.diff(steps))) if data.shape[0] > 1 else 1.0
+        if dt <= 0.0:
+            return []
+
+        fft = np.fft.rfft(cl)
+        freq = np.fft.rfftfreq(cl.size, d=dt)
+        if freq.size < 2:
+            return []
+
+        amp = np.abs(fft)
+        amp[0] = 0.0
+        top_idx = np.argsort(amp)[::-1][:max_peaks]
+        peaks = [(float(freq[i]), float(amp[i])) for i in top_idx if amp[i] > 0.0]
+        return peaks
+
+    def print_force_spectrum(
+        self,
+        diameter: float,
+        u_ref: float,
+        min_step: int = 0,
+        max_peaks: int = 3,
+    ):
+        peaks = self.compute_force_spectrum(min_step=min_step, max_peaks=max_peaks)
+        if not peaks:
+            print("\n--- Force Spectrum ---")
+            print("No sufficient force history for spectrum.")
+            return
+
+        print("\n--- Force Spectrum (Cl) ---")
+        print("f_peak(1/step) | amplitude | St")
+        for f_peak, amp in peaks:
+            st = f_peak * diameter / u_ref if u_ref > 0.0 else 0.0
+            print(f"{f_peak:12.6f} | {amp:9.3e} | {st:6.3f}")
+
     def get_residuals(self) -> Dict[str, float]:
         diag = self.solver.get_diagnostics()
+        n_fluid = self._get_fluid_cells()
         scale_u = max(
             self.solver.u_ref, diag["mom_scale_x"] / (self.solver.nx * self.solver.ny)
         )
         scale_v = max(
             self.solver.u_ref, diag["mom_scale_y"] / (self.solver.nx * self.solver.ny)
         )
-        res_u = diag["mom_res_x"] / (scale_u + 1e-12)
-        res_v = diag["mom_res_y"] / (scale_v + 1e-12)
+        res_u = diag["mom_res_x"] / (n_fluid * (scale_u + 1e-12))
+        res_v = diag["mom_res_y"] / (n_fluid * (scale_v + 1e-12))
         res_rho = diag["mass_residual"] / (diag["total_mass"] + 1e-12)
         return {"R_u": res_u, "R_v": res_v, "R_rho": res_rho}
+
+    def _get_fluid_cells(self) -> int:
+        n_fluid = int(
+            self.solver.num_fluid_bulk[None] + self.solver.num_fluid_boundary[None]
+        )
+        if n_fluid <= 0:
+            n_fluid = self.solver.nx * self.solver.ny
+        return n_fluid
 
     def print_header(self, include_forces: bool = False):
         """列印表格頭部"""
@@ -168,7 +234,7 @@ class Diagnostics:
             self._headers = [
                 "step",
                 "macro_res",
-                "KE",
+                "KE_mean",
                 "f_min",
                 "mass_error",
                 "total_mass",
@@ -183,7 +249,7 @@ class Diagnostics:
             self._headers = [
                 "step",
                 "macro_res",
-                "KE",
+                "KE_mean",
                 "f_min",
                 "mass_error",
                 "total_mass",
@@ -208,7 +274,8 @@ class Diagnostics:
             diag["initial_mass"] + 1e-12
         )
         macro_res = float(np.sqrt(res["R_u"] ** 2 + res["R_v"] ** 2))
-        ke = diag.get("total_KE", 0.0)
+        n_fluid = self._get_fluid_cells()
+        ke = diag.get("total_KE", 0.0) / n_fluid
 
         if f_field is not None:
             self.compute_min_f(f_field)
@@ -296,8 +363,11 @@ class Diagnostics:
         # 能量變化率（相對初始能量）
         KE_init = diag.get("initial_KE", 0.0)
         KE_final = diag.get("total_KE", 0.0)
-        if KE_init > 1e-12:
-            KE_change = (KE_final - KE_init) / KE_init
+        n_fluid = self._get_fluid_cells()
+        KE_init_mean = KE_init / n_fluid
+        KE_final_mean = KE_final / n_fluid
+        if KE_init_mean > 1e-12:
+            KE_change = (KE_final_mean - KE_init_mean) / KE_init_mean
         else:
             KE_change = 0.0
 
@@ -313,6 +383,8 @@ class Diagnostics:
         print(f"\nEnergy Budget:")
         print(f"  Initial KE     : {KE_init:.6f}")
         print(f"  Final KE       : {KE_final:.6f}")
+        print(f"  Initial KE_mean: {KE_init_mean:.6f}")
+        print(f"  Final KE_mean  : {KE_final_mean:.6f}")
         print(f"  Relative Change: {KE_change:+.2%}")
 
         # 能量變化診斷

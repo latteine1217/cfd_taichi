@@ -46,7 +46,7 @@ def run_lid_driven_cavity(
         res: 解析度（方形網格）
         re: Reynolds 數
         lid_vel: 上蓋速度
-        cs: Smagorinsky 常數
+        cs: LES 啟用旗標 (<=0 表示不使用 LES；動態 Smagorinsky 自動估計)
         steps: 總步數
         interval: 儲存間隔
         tol: 收斂容差
@@ -94,7 +94,10 @@ def run_lid_driven_cavity(
     print(f"Reynolds Number: {re}")
     print(f"Lid Velocity: {lid_vel}")
     print(f"Viscosity: {solver.nu:.6f}")
-    print(f"Smagorinsky Cs: {cs}")
+    if cs > 0.0:
+        print("LES Model: Dynamic Smagorinsky (auto Cs)")
+    else:
+        print("LES Model: Disabled")
     print(f"\nStarting simulation...")
 
     headers = diag.print_header(include_forces=False)
@@ -176,7 +179,12 @@ def main():
     parser.add_argument("--res", type=int, default=256, help="Resolution (NxN grid)")
     parser.add_argument("--re", type=float, default=1000.0, help="Reynolds number")
     parser.add_argument("--lid_vel", type=float, default=0.1, help="Lid velocity")
-    parser.add_argument("--cs", type=float, default=0.16, help="Smagorinsky constant")
+    parser.add_argument(
+        "--cs",
+        type=float,
+        default=0.16,
+        help="LES enable flag (<=0 disables dynamic Smagorinsky)",
+    )
     parser.add_argument("--steps", type=int, default=50000, help="Total steps")
     parser.add_argument("--interval", type=int, default=100, help="Save interval")
     parser.add_argument("--tol", type=float, default=1e-5, help="Convergence tolerance")

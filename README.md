@@ -21,7 +21,7 @@
 ## 🚀 核心優勢
 
 *   🏗️ **統一核心架構**: 單一 `LBMSolver` 核心透過模組化設計（BC, Collision, Diagnostics），完美支援所有模擬場景。
-*   🌪️ **進階物理模型**: 支援 **MRT-LBM** (Multiple-Relaxation-Time) 碰撞算子與 **Smagorinsky LES** (Large Eddy Simulation) 湍流模型。
+*   🌪️ **進階物理模型**: 支援 **MRT-LBM** (Multiple-Relaxation-Time) 碰撞算子與 **Dynamic Smagorinsky LES**（自動估計 Cs）。
 *   🧱 **物理嚴謹邊界條件**: 出口採用 **Orlanski 非反射外流**，Free-Slip 預設 **對稱延拓**，降低反射與剪切誤差。
 *   💨 **粒子煙線系統**: 內建並行粒子系統，支援同時追蹤 50 萬個流體粒子，重現真實風洞中的煙線（Smoke Lines）可視化。
 *   📊 **動態監控系統**: 具備即時殘差監控與質量守恆檢查，確保物理模擬的準確性。
@@ -36,7 +36,7 @@
 *   **EMRT (Single-α)**: 先做 MRT，再以熵條件求解 α，將更新縮放到熵可接受範圍。
 *   **Ghost Cells**: 場變數採 `(nx+2, ny+2)`，計算域為 `[1..nx, 1..ny]`，避免越界分支。
 *   **邊界條件**: Orlanski 出口、Free‑Slip 對稱延拓、Bouzidi 插值 BB（曲面幾何）。
-*   **診斷指標**: `macro_res`, `KE`, `f_min`, `mass_error`, `total_mass` 等即時監控。
+*   **診斷指標**: `macro_res`, `KE_mean`, `f_min`, `mass_error`, `total_mass` 等即時監控。
 *   **輸出格式**: `.npy` state + history；可選 `.vti` 供 ParaView 後處理。
 
 ---

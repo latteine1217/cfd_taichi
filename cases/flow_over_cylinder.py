@@ -32,18 +32,18 @@ from utils.geometry import create_circle_mask_and_sdf
 
 
 def run_flow_over_cylinder(
-    res_y: int = 128,
+    res_y: int = 256,
     re: float = 150.0,
     u_in: float = 0.1,
     diameter: float = None,
     cs: float = 0.16,
-    steps: int = 50000,
-    interval: int = 1000,
+    steps: int = 10000,
+    interval: int = 100,
     tol: float = 1e-5,
     output_dir: str = "output_cylinder",
     sidewall: str = "outflow",
     outflow_type: str = "orlanski",
-    outlet_relaxation: float = 0.2,
+    outlet_relaxation: float = 0.02,
     vtk_output: bool = False,
     collision_model: str = "mrt",
 ):
@@ -55,7 +55,7 @@ def run_flow_over_cylinder(
         re: Reynolds 數
         u_in: 入口速度
         diameter: 圓柱直徑（若為 None 則使用 res_y/9）
-        cs: Smagorinsky 常數
+        cs: LES 啟用旗標 (<=0 表示不使用 LES；動態 Smagorinsky 自動估計)
         steps: 總步數
         interval: 儲存間隔
         tol: 收斂容差
@@ -72,7 +72,7 @@ def run_flow_over_cylinder(
     print("=" * 70)
 
     # === 計算網格與幾何參數 ===
-    nx = int(3.5 * res_y)  # 長寬比 3.5:1
+    nx = int(2.5 * res_y)  # 長寬比 2.5:1
     ny = res_y
 
     if diameter is None:
@@ -110,7 +110,23 @@ def run_flow_over_cylinder(
     bc = BoundaryConditions(solver)
 
     # 入口：固定速度
-    bc.add_velocity_inlet(u_in, location="left")
+    bc.add_velocity_inlet(
+        u_in,
+        location="left",
+        epsilon=0.02,
+        strouhal=0.2,
+        asymmetry=0.03,
+    )
+    inlet_eps = float(bc.u_inlet_perturb[None])
+    inlet_omega = float(bc.u_inlet_omega[None])
+    inlet_asym = float(bc.u_inlet_asym[None])
+    if inlet_omega > 0.0:
+        inlet_period = 2.0 * np.pi / inlet_omega
+        print(
+            f"  Inlet Perturbation: epsilon={inlet_eps:.3f}, "
+            f"omega={inlet_omega:.4e}, period={inlet_period:.1f} steps, "
+            f"asymmetry={inlet_asym:.3f}"
+        )
 
     # 出口：根據 outflow_type 選擇
     if outflow_type == "orlanski":
@@ -149,7 +165,10 @@ def run_flow_over_cylinder(
     print(f"Reynolds Number: {re}")
     print(f"Inlet Velocity: {u_in}")
     print(f"Viscosity: {solver.nu:.6f}")
-    print(f"Smagorinsky Cs: {cs}")
+    if cs > 0.0:
+        print("LES Model: Dynamic Smagorinsky (auto Cs)")
+    else:
+        print("LES Model: Disabled")
     print(f"\nStarting simulation...")
 
     headers = diag.print_header(include_forces=True)
@@ -219,6 +238,14 @@ def run_flow_over_cylinder(
 
     diag.print_summary(headers)
 
+    spectrum_start = int(0.2 * last_step)
+    diag.print_force_spectrum(
+        diameter=diameter,
+        u_ref=u_in,
+        min_step=spectrum_start,
+        max_peaks=3,
+    )
+
     min_step = int(0.5 * last_step)
     stats = diag.compute_force_stats(min_step=min_step)
     st = diag.compute_strouhal(diameter=diameter, u_ref=u_in, min_step=min_step)
@@ -276,7 +303,12 @@ def main():
     parser.add_argument(
         "--diameter", type=float, default=None, help="Cylinder diameter"
     )
-    parser.add_argument("--cs", type=float, default=0.16, help="Smagorinsky constant")
+    parser.add_argument(
+        "--cs",
+        type=float,
+        default=0.16,
+        help="LES enable flag (<=0 disables dynamic Smagorinsky)",
+    )
     parser.add_argument("--steps", type=int, default=50000, help="Total steps")
     parser.add_argument("--interval", type=int, default=100, help="Save interval")
     parser.add_argument("--tol", type=float, default=1e-5, help="Convergence tolerance")
@@ -300,7 +332,7 @@ def main():
     parser.add_argument(
         "--outlet_relax",
         type=float,
-        default=0.2,
+        default=0.02,
         help="Outlet relaxation factor (stable outlet)",
     )
     parser.add_argument(

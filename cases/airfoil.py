@@ -46,7 +46,7 @@ def run_airfoil(
     output_dir: str = "output_airfoil",
     sidewall: str = "outflow",
     outflow_type: str = "orlanski",
-    outlet_relaxation: float = 0.2,
+    outlet_relaxation: float = 0.02,
     vtk_output: bool = False,
     collision_model: str = "mrt",
 ):
@@ -144,7 +144,10 @@ def run_airfoil(
     print(f"\nReynolds Number: {re}")
     print(f"Inlet Velocity: {u_in}")
     print(f"Viscosity: {solver.nu:.6f}")
-    print(f"Smagorinsky Cs: {cs}")
+    if cs > 0.0:
+        print("LES Model: Dynamic Smagorinsky (auto Cs)")
+    else:
+        print("LES Model: Disabled")
     print(f"\nStarting simulation...")
 
     headers = diag.print_header(include_forces=True)
@@ -271,7 +274,12 @@ def main():
     parser.add_argument("--aoa", type=float, default=10.0, help="Angle of attack (deg)")
     parser.add_argument("--slat", type=float, default=20.0, help="Slat angle (deg)")
     parser.add_argument("--flap", type=float, default=30.0, help="Flap angle (deg)")
-    parser.add_argument("--cs", type=float, default=0.16, help="Smagorinsky constant")
+    parser.add_argument(
+        "--cs",
+        type=float,
+        default=0.16,
+        help="LES enable flag (<=0 disables dynamic Smagorinsky)",
+    )
     parser.add_argument("--steps", type=int, default=50000, help="Total steps")
     parser.add_argument("--interval", type=int, default=100, help="Save interval")
     parser.add_argument("--tol", type=float, default=1e-5, help="Convergence tolerance")
@@ -295,7 +303,7 @@ def main():
     parser.add_argument(
         "--outlet_relax",
         type=float,
-        default=0.2,
+        default=0.02,
         help="Outlet relaxation factor (stable outlet)",
     )
     parser.add_argument(

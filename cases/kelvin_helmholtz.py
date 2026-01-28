@@ -106,7 +106,7 @@ def run_kelvin_helmholtz(
         perturb_amp: 擾動速度幅值
         perturb_mode: x 方向擾動模態數
         perturb_sigma: 擾動垂向衰減尺度
-        cs: Smagorinsky 常數
+        cs: LES 啟用旗標 (<=0 表示不使用 LES；動態 Smagorinsky 自動估計)
         steps: 總步數
         interval: 儲存間隔
         tol: 收斂容差
@@ -319,7 +319,12 @@ def main():
         default=12.0,
         help="Perturbation vertical decay scale",
     )
-    parser.add_argument("--cs", type=float, default=0.16, help="Smagorinsky constant")
+    parser.add_argument(
+        "--cs",
+        type=float,
+        default=0.16,
+        help="LES enable flag (<=0 disables dynamic Smagorinsky)",
+    )
     parser.add_argument("--steps", type=int, default=50000, help="Total steps")
     parser.add_argument("--interval", type=int, default=1000, help="Save interval")
     parser.add_argument("--tol", type=float, default=1e-5, help="Convergence tolerance")
