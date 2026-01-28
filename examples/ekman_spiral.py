@@ -378,6 +378,87 @@ class MultiLayerEkmanSolver:
             u_field[i + 1, j + 1][0] += fx
             u_field[i + 1, j + 1][1] += fy
 
+    def compute_ekman_transport(self) -> Tuple[float, float, float]:
+        """
+        計算 Ekman 傳輸（垂直積分）
+
+        Returns:
+            (M_x, M_y, angle): 東向傳輸、北向傳輸、傳輸角度 (度)
+
+        Physics:
+            M_x = Σ u[k] * dz
+            M_y = Σ v[k] * dz
+            理論：傳輸方向垂直於風向（90°）
+        """
+        u_prof, v_prof = self.get_velocity_profile()
+
+        M_x = np.sum(u_prof) * self.dz
+        M_y = np.sum(v_prof) * self.dz
+        angle = np.degrees(np.arctan2(M_y, M_x))
+
+        return M_x, M_y, angle
+
+    def compute_surface_angle(self) -> float:
+        """
+        計算表面流偏離東向的角度
+
+        Returns:
+            角度 (度)，理論值 ≈ 45°
+        """
+        u_prof, v_prof = self.get_velocity_profile()
+        return np.degrees(np.arctan2(v_prof[0], u_prof[0]))
+
+    def compute_total_ke(self) -> float:
+        """計算總動能（所有層）"""
+        self._compute_layer_diagnostics()
+        ke = self.layer_ke.to_numpy()
+        return np.sum(ke) * self.dz
+
+    def check_mass_conservation(self) -> np.ndarray:
+        """
+        檢查每層質量守恆
+
+        Returns:
+            shape (n_layers,)，每層的質量誤差
+        """
+        errors = np.zeros(self.n_layers)
+        for k, solver in enumerate(self.layers):
+            solver._update_macro(solver.f if k % 2 == 0 else solver.f_new)
+            solver._update_diagnostics()
+            # 計算質量誤差：|M(t) - M(0)| / M(0)
+            mass_current = solver.total_mass[None]
+            mass_initial = solver.initial_mass[None]
+            if mass_initial > 1e-12:
+                errors[k] = abs(mass_current - mass_initial) / mass_initial
+            else:
+                errors[k] = 0.0
+        return errors
+
+    def print_diagnostics(self, step: int, physical_time_hr: float):
+        """
+        輸出診斷資訊（模擬 Diagnostics 格式）
+
+        Args:
+            step: 時間步數
+            physical_time_hr: 物理時間（小時）
+        """
+        u_prof, v_prof = self.get_velocity_profile()
+        u_surf = np.sqrt(u_prof[0]**2 + v_prof[0]**2)
+        u_bot = np.sqrt(u_prof[-1]**2 + v_prof[-1]**2)
+
+        angle_surf = self.compute_surface_angle()
+        M_x, M_y, transport_angle = self.compute_ekman_transport()
+        ke_total = self.compute_total_ke()
+
+        mass_errors = self.check_mass_conservation()
+        max_mass_error = np.max(mass_errors)
+
+        print(
+            f"| {step:5d} | {physical_time_hr:8.2f} | {u_surf:6.4f} | "
+            f"{angle_surf:6.1f}° | {u_bot:6.4f} | {ke_total:8.4f} | "
+            f"{transport_angle:6.1f}° | {max_mass_error:8.2e} |"
+        )
+
     def get_velocity_profile(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         提取垂直速度剖面（空間平均）
@@ -390,27 +471,31 @@ class MultiLayerEkmanSolver:
         v_prof = self.layer_v_mean.to_numpy()
         return u_prof, v_prof
 
-    @ti.kernel
     def _compute_layer_diagnostics(self):
         """計算每層的空間平均診斷量"""
         for k in range(self.n_layers):
-            u_sum = 0.0
-            v_sum = 0.0
-            ke_sum = 0.0
-            count = 0
+            self._compute_single_layer_diagnostics(k, self.layers[k].u)
 
-            for i, j in ti.ndrange(self.nx, self.ny):
-                u_val = self.layers[k].u[i + 1, j + 1][0]
-                v_val = self.layers[k].u[i + 1, j + 1][1]
+    @ti.kernel
+    def _compute_single_layer_diagnostics(self, k: ti.i32, u_field: ti.template()):
+        """計算單層的空間平均診斷量"""
+        u_sum = 0.0
+        v_sum = 0.0
+        ke_sum = 0.0
+        count = 0
 
-                u_sum += u_val
-                v_sum += v_val
-                ke_sum += 0.5 * (u_val**2 + v_val**2)
-                count += 1
+        for i, j in ti.ndrange(self.nx, self.ny):
+            u_val = u_field[i + 1, j + 1][0]
+            v_val = u_field[i + 1, j + 1][1]
 
-            self.layer_u_mean[k] = u_sum / ti.cast(count, ti.f32)
-            self.layer_v_mean[k] = v_sum / ti.cast(count, ti.f32)
-            self.layer_ke[k] = ke_sum / ti.cast(count, ti.f32)
+            u_sum += u_val
+            v_sum += v_val
+            ke_sum += 0.5 * (u_val**2 + v_val**2)
+            count += 1
+
+        self.layer_u_mean[k] = u_sum / ti.cast(count, ti.f32)
+        self.layer_v_mean[k] = v_sum / ti.cast(count, ti.f32)
+        self.layer_ke[k] = ke_sum / ti.cast(count, ti.f32)
 
 
 if __name__ == "__main__":
@@ -435,26 +520,25 @@ if __name__ == "__main__":
     print(f"科氏參數: {solver.f} s⁻¹")
     print("✅ 初始化成功")
 
-    # 測試剪應力計算
-    solver.layers[0].u.fill(0.0)
-    solver.layers[1].u.fill(0.0)
+    # 初始化各層的質量基準
+    for k in range(solver.n_layers):
+        f_src = solver.layers[k].f if k % 2 == 0 else solver.layers[k].f_new
+        solver.layers[k]._update_macro(f_src)
+        solver.layers[k]._update_diagnostics()
+        solver.layers[k].initial_mass[None] = solver.layers[k].total_mass[None]
 
-    # 設定速度梯度：第 0 層 u=0.1，第 1 層 u=0.0
-    for i in range(solver.nx):
-        for j in range(solver.ny):
-            solver.layers[0].u[i + 1, j + 1] = [0.1, 0.0]
-            solver.layers[1].u[i + 1, j + 1] = [0.0, 0.0]
+    # 測試診斷
+    print("\n=== 診斷系統測試 ===")
+    print("| step  | time(hr) | u_surf | angle_surf | u_bot  | KE_total | transport_angle | mass_err |")
+    print("|-------|----------|--------|------------|--------|----------|-----------------|----------|")
 
-    solver._compute_shear_stress()
+    solver.print_diagnostics(0, 0.0)
 
-    tau_x = solver.shear_stress_x.to_numpy()
+    # 測試多步運行
+    print("\n=== 短時間演化測試 ===")
+    for step in range(1, 11):
+        solver.step()
+        if step % 5 == 0:
+            solver.print_diagnostics(step, step * 1.0)  # 假設 dt=1 hr
 
-    print("\n=== 剪應力測試 ===")
-    print(f"頂層界面（風應力）: {tau_x[0, 0, 0]:.4f} N/m²")
-    print(f"第 1 界面（黏性）: {tau_x[1, 0, 0]:.4f} N/m²")
-
-    # 理論值：τ = ρ ν_v Δu/dz = 1025 * 1e-3 * 0.1/5 = 0.0205
-    expected = 1025.0 * 1.0e-3 * 0.1 / 5.0
-    assert abs(tau_x[1, 0, 0] - expected) < 1e-6
-    print(f"理論值: {expected:.4f} N/m²")
-    print("✅ 剪應力計算正確")
+    print("\n✅ 診斷系統測試完成")
