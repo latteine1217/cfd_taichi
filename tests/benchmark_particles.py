@@ -12,11 +12,11 @@ import numpy as np
 
 def benchmark_particle_system():
     """執行粒子系統性能測試"""
-    from core import LBMSolver
+    from lbm_taichi.core import LBMSolver
 
-    print("="*70)
-    print(" "*20 + "粒子系統性能基準測試")
-    print("="*70)
+    print("=" * 70)
+    print(" " * 20 + "粒子系統性能基準測試")
+    print("=" * 70)
 
     # 初始化
     ti.init(arch=ti.metal, default_fp=ti.f32, kernel_profiler=True)
@@ -112,18 +112,24 @@ def benchmark_particle_system():
     print(f"  傳輸速度: {particles.nbytes / 1024 / transfer_time:.1f} KB/ms")
 
     # === 總結 ===
-    print("\n" + "="*70)
-    print(" "*25 + "性能總結")
-    print("-"*70)
+    print("\n" + "=" * 70)
+    print(" " * 25 + "性能總結")
+    print("-" * 70)
     print(f"{'操作':<20} {'時間 (ms)':<15} {'吞吐量':<25}")
-    print("-"*70)
-    print(f"{'粒子初始化':<20} {init_time:<15.3f} {solver.num_particles / init_time:>20.0f} 粒子/ms")
+    print("-" * 70)
+    print(
+        f"{'粒子初始化':<20} {init_time:<15.3f} {solver.num_particles / init_time:>20.0f} 粒子/ms"
+    )
     print(f"{'粒子發射':<20} {emit_time:<15.4f} {32 / emit_time:>20.0f} 粒子/ms")
     print(f"{'粒子推進':<20} {advect_time:<15.3f} {3200 / advect_time:>20.0f} 粒子/ms")
-    print(f"{'粒子統計':<20} {count_time:<15.3f} {solver.num_particles / count_time:>20.0f} 粒子/ms")
+    print(
+        f"{'粒子統計':<20} {count_time:<15.3f} {solver.num_particles / count_time:>20.0f} 粒子/ms"
+    )
     print(f"{'完整時間步':<20} {step_time:<15.3f} {1000 / step_time:>20.0f} FPS")
-    print(f"{'數據導出':<20} {transfer_time:<15.3f} {particles.nbytes / 1024 / transfer_time:>20.1f} KB/ms")
-    print("="*70)
+    print(
+        f"{'數據導出':<20} {transfer_time:<15.3f} {particles.nbytes / 1024 / transfer_time:>20.1f} KB/ms"
+    )
+    print("=" * 70)
 
     # === Kernel Profiler ===
     print("\n[Taichi Kernel Profiler]")

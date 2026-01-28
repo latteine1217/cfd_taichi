@@ -23,7 +23,7 @@
 
 ### 1. 完全並行的粒子初始化
 
-**檔案**: `core/lbm_solver.py` (line 119-135)
+**檔案**: `src/lbm_taichi/core/lbm_solver.py` (line 119-135)
 
 **優化前**:
 ```python
@@ -52,7 +52,7 @@ def _init_particles(self):
 
 ### 2. 批次粒子發射
 
-**檔案**: `core/lbm_solver.py` (line 137-157)
+**檔案**: `src/lbm_taichi/core/lbm_solver.py` (line 137-157)
 
 **設計原理**:
 - 所有粒子發射位置計算完全獨立
@@ -84,7 +84,7 @@ def _emit_particles(self, num_lines: int):
 
 ### 3. 高效粒子推進
 
-**檔案**: `core/lbm_solver.py` (line 159-213)
+**檔案**: `src/lbm_taichi/core/lbm_solver.py` (line 159-213)
 
 **優化技巧**:
 
@@ -138,7 +138,7 @@ else:
 
 ### 4. 並行粒子統計
 
-**檔案**: `core/lbm_solver.py` (line 215-237)
+**檔案**: `src/lbm_taichi/core/lbm_solver.py` (line 215-237)
 
 **實作**:
 ```python
@@ -166,7 +166,7 @@ def _count_active_particles(self) -> ti.i32:
 
 ### 5. 緊湊粒子導出
 
-**檔案**: `core/diagnostics.py` (line 164-178)
+**檔案**: `src/lbm_taichi/core/diagnostics.py` (line 164-178)
 
 **優化策略**:
 ```python

@@ -23,7 +23,7 @@ import sys
 # 添加父目錄到路徑
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from core import LBMSolver, BoundaryConditions
+from lbm_taichi.core import LBMSolver, BoundaryConditions
 
 
 def test_neumann_mass_conservation(
@@ -131,7 +131,7 @@ def test_corner_handling(
     print("測試 2: 角點處理（Lid-Driven Cavity）")
     print("=" * 60)
 
-    from utils.geometry import create_lid_velocity_profile
+    from lbm_taichi.utils.geometry import create_lid_velocity_profile
 
     for method, use_extrapolation in [("固體角點", False), ("外推角點", True)]:
         print(f"\n--- {method} ---")
@@ -210,7 +210,7 @@ def test_sponge_layer(
     print("測試 3: Sponge Layer 穩定性（Re=5000）")
     print("=" * 60)
 
-    from utils.geometry import create_circle_mask
+    from lbm_taichi.utils.geometry import create_circle_mask
 
     for version, enable_sponge in [("無海綿層", False), ("有海綿層", True)]:
         print(f"\n--- {version} ---")

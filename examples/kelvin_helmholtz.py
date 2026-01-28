@@ -26,11 +26,11 @@ import time
 import numpy as np
 import taichi as ti
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+SRC_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, "src"))
+if SRC_ROOT not in sys.path:
+    sys.path.insert(0, SRC_ROOT)
 
-from core import BoundaryConditions, Diagnostics, LBMSolver
+from lbm_taichi.core import BoundaryConditions, Diagnostics, LBMSolver
 
 
 def _build_kelvin_helmholtz_fields(

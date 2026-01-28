@@ -23,12 +23,18 @@ Physical Setup:
 - 渦度場演化
 """
 
+import os
+import sys
 import taichi as ti
 import numpy as np
 import argparse
 import time
-import os
-from core import LBMSolver, BoundaryConditions, Diagnostics
+
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+)
+
+from lbm_taichi.core import LBMSolver, BoundaryConditions, Diagnostics
 
 
 def run_taylor_green(

@@ -12,7 +12,7 @@ import os
 import time
 from tabulate import tabulate
 from typing import Optional, Dict, List, Tuple
-from utils.vtk_io import write_vti
+from lbm_taichi.utils.vtk_io import write_vti
 
 
 @ti.data_oriented

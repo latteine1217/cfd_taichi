@@ -167,7 +167,7 @@ def check_cfl_condition(self, warn_only=True):
 
 ```bash
 # 運行基準測試
-python cases/lid_driven_cavity.py --res 128 --re 100 --steps 10000
+python examples/lid_driven_cavity.py --res 128 --re 100 --steps 10000
 ```
 
 **預期行為**：
@@ -491,8 +491,8 @@ if step % 100 == 0:
 ## 7. 參考資料（References）
 
 ### 內部文檔
-- `core/lbm_solver.py`: Line 1010-1034（step 實作）
-- `core/lbm_solver.py`: Line 766-818（gradient-based LES）
+- `src/lbm_taichi/core/lbm_solver.py`: Line 1010-1034（step 實作）
+- `src/lbm_taichi/core/lbm_solver.py`: Line 766-818（gradient-based LES）
 - `AGENTS.md`: 物理正確性優先原則
 
 ### 外部理論

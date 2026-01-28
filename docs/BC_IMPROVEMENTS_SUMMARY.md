@@ -34,7 +34,7 @@ bc.add_neumann_outflow(location='right', mass_corrected=True)  # 默認啟用
 ```
 
 **實現**：
-- 檔案：`core/boundary_conditions.py`
+- 檔案：`src/lbm_taichi/core/boundary_conditions.py`
 - Kernel：`_neumann_outflow_*_corrected()`
 - 方法：零梯度 + 等比例縮放
 
@@ -58,7 +58,7 @@ bc.handle_corners_extrapolation()  # 從兩側內部節點外推
 ```
 
 **實現**：
-- 檔案：`core/boundary_conditions.py`
+- 檔案：`src/lbm_taichi/core/boundary_conditions.py`
 - Kernel：`_handle_corners_extrapolation_kernel()`
 - 方法：對角平均外推
 
@@ -83,7 +83,7 @@ solver = LBMSolver(
 ```
 
 **實現**：
-- 檔案：`core/lbm_solver.py`
+- 檔案：`src/lbm_taichi/core/lbm_solver.py`
 - Kernel：`_apply_sponge_layer()`
 - 方法：出口前 20% 區域漸進式阻尼
 
@@ -106,7 +106,7 @@ if step % 100 == 0:
 ```
 
 **實現**：
-- 檔案：`core/lbm_solver.py`
+- 檔案：`src/lbm_taichi/core/lbm_solver.py`
 - Kernel：`_global_mass_correction()`
 - 方法：均勻縮放所有流體節點
 
@@ -131,7 +131,7 @@ bc.add_periodic_boundary('y')  # Y 方向週期
 ```
 
 **實現**：
-- 檔案：`core/boundary_conditions.py`
+- 檔案：`src/lbm_taichi/core/boundary_conditions.py`
 - Kernel：`_periodic_x()`, `_periodic_y()`
 - 方法：邊界從對側內部複製
 
@@ -162,7 +162,7 @@ bc.add_zou_he_pressure_outlet(
 ```
 
 **實現**：
-- 檔案：`core/boundary_conditions.py`
+- 檔案：`src/lbm_taichi/core/boundary_conditions.py`
 - Kernel：`_zou_he_outlet_*_relaxed()`
 - 方法：ρ_applied = (1-α)*ρ_current + α*ρ_target
 
@@ -183,7 +183,7 @@ bc.add_zou_he_pressure_outlet(
 
 ### **核心實現**
 ```
-core/
+src/lbm_taichi/core/
 ├── boundary_conditions.py      [修改] +400 行
 │   ├── Neumann BC 質量修正版
 │   ├── 角點外推處理
@@ -229,7 +229,7 @@ docs/
 
 ### **範例案例**
 ```
-cases/
+examples/
 └── taylor_green_vortex.py      [新增] ~300 行
     └── 週期邊界條件標準測試
 ```
@@ -248,7 +248,7 @@ python tests/test_bc_improvements.py --test all
 python tests/test_priority2_features.py --test all
 
 # Taylor-Green Vortex 基準測試
-python cases/taylor_green_vortex.py --res 128 --re 100 --steps 10000
+python examples/taylor_green_vortex.py --res 128 --re 100 --steps 10000
 ```
 
 ### **預期結果**

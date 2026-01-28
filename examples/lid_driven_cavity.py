@@ -19,13 +19,19 @@ Why 這個 case?
 - Ghia et al. (1982), Re=100, 400, 1000, 3200
 """
 
+import os
+import sys
 import taichi as ti
 import numpy as np
 import argparse
 import time
-import os
-from core import LBMSolver, BoundaryConditions, Diagnostics
-from utils.geometry import create_lid_velocity_profile
+
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+)
+
+from lbm_taichi.core import LBMSolver, BoundaryConditions, Diagnostics
+from lbm_taichi.utils.geometry import create_lid_velocity_profile
 
 
 def run_lid_driven_cavity(

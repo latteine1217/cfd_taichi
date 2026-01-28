@@ -10,7 +10,7 @@
 
 ### ✅ 1. 新增能量守恆監控
 
-**檔案**: `core/lbm_solver.py`, `core/diagnostics.py`
+**檔案**: `src/lbm_taichi/core/lbm_solver.py`, `src/lbm_taichi/core/diagnostics.py`
 
 **目的**: 監控動能變化以診斷數值耗散與驗證物理正確性
 
@@ -56,7 +56,7 @@ Energy Budget:
 
 ### ✅ 2. 輸出 Reynolds 應力（LES 驗證）
 
-**檔案**: `core/lbm_solver.py`, `utils/visualization.py`
+**檔案**: `src/lbm_taichi/core/lbm_solver.py`, `src/lbm_taichi/utils/visualization.py`
 
 **目的**: 可視化 Smagorinsky 渦黏度分佈，驗證 LES 模型在正確位置激活
 
@@ -94,7 +94,7 @@ def plot_eddy_viscosity(self, nu_sgs, mask=None, ...):
 **使用範例**:
 ```bash
 # 生成渦黏度可視化
-python utils/visualization.py output_airfoil --type eddy_viscosity --gif
+python src/lbm_taichi/utils/visualization.py output_airfoil --type eddy_viscosity --gif
 ```
 
 **預期結果**:
@@ -106,7 +106,7 @@ python utils/visualization.py output_airfoil --type eddy_viscosity --gif
 
 ### ✅ 3. 實作機翼勢流初始化
 
-**檔案**: `core/lbm_solver.py`, `cases/airfoil.py`
+**檔案**: `src/lbm_taichi/core/lbm_solver.py`, `examples/airfoil.py`
 
 **目的**: 為機翼配置提供物理一致的初始速度場，考慮攻角與環量
 
@@ -173,7 +173,7 @@ solver.init_potential_flow_airfoil(
 
 ```bash
 # 高 Re（低黏度）圓柱繞流
-python cases/flow_over_cylinder.py --re 10000 --steps 5000
+python examples/flow_over_cylinder.py --re 10000 --steps 5000
 
 # 預期結果：
 # Energy Budget:
@@ -184,10 +184,10 @@ python cases/flow_over_cylinder.py --re 10000 --steps 5000
 
 ```bash
 # 機翼 Re=1000（湍流）
-python cases/airfoil.py --res 256 --re 1000 --aoa 15 --cs 0.16
+python examples/airfoil.py --res 256 --re 1000 --aoa 15 --cs 0.16
 
 # 生成渦黏度圖
-python utils/visualization.py output_airfoil --type eddy_viscosity
+python src/lbm_taichi/utils/visualization.py output_airfoil --type eddy_viscosity
 
 # 檢查：
 # - 前緣分離: nu_sgs > 0.01
@@ -198,7 +198,7 @@ python utils/visualization.py output_airfoil --type eddy_viscosity
 
 ```bash
 # 對比實驗
-python cases/airfoil.py --res 256 --aoa 10 --steps 3000
+python examples/airfoil.py --res 256 --aoa 10 --steps 3000
 
 # 檢查初始輸出（step=0）:
 # - Lift Coefficient (Cl): 應接近 2π*sin(α) ≈ 1.09
@@ -235,7 +235,7 @@ python cases/airfoil.py --res 256 --aoa 10 --steps 3000
 ## 📝 修改檔案清單
 
 ```
-core/lbm_solver.py
+src/lbm_taichi/core/lbm_solver.py
 ├── total_KE, initial_KE        [新增] 能量追蹤
 ├── nu_sgs                       [新增] 渦黏度場
 ├── _update_diagnostics()        [改進] 添加動能計算
@@ -243,17 +243,17 @@ core/lbm_solver.py
 ├── init_potential_flow_airfoil() [新增] 機翼勢流初始化
 └── (修改碰撞 kernel 儲存 nu_sgs)
 
-core/diagnostics.py
+src/lbm_taichi/core/diagnostics.py
 └── print_physics_validation()   [改進] 添加能量預算報告
 
-utils/visualization.py
+src/lbm_taichi/utils/visualization.py
 ├── plot_eddy_viscosity()        [新增] 渦黏度可視化
 └── process_all()                [改進] 支援 eddy_viscosity
 
-cases/airfoil.py
+examples/airfoil.py
 └── init_potential_flow_airfoil() [整合] 機翼勢流初始化
 
-cases/flow_over_cylinder.py
+examples/flow_over_cylinder.py
 └── solver.initial_KE[None]      [整合] 能量初始化
 ```
 

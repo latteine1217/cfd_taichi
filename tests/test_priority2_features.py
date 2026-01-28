@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from core import LBMSolver, BoundaryConditions
+from lbm_taichi.core import LBMSolver, BoundaryConditions
 
 
 def test_periodic_bc_taylor_green(
@@ -177,7 +177,7 @@ def test_reflection_suppression(
     print("測試 2: Zou-He 反射波抑制（圓柱繞流）")
     print("=" * 60)
 
-    from utils.geometry import create_circle_mask
+    from lbm_taichi.utils.geometry import create_circle_mask
 
     for version, relaxation in [("無鬆弛", 0.0), ("有鬆弛 α=0.3", 0.3)]:
         print(f"\n--- {version} ---")
@@ -208,7 +208,7 @@ def test_reflection_suppression(
         solver.apply_boundary_conditions(solver.f_new)
 
         # 主迴圈
-        from core import Diagnostics
+        from lbm_taichi.core import Diagnostics
 
         diag = Diagnostics(solver, output_dir=output_dir)
 

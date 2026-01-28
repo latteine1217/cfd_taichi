@@ -10,7 +10,7 @@
 
 ### ✅ 1. 修正力係數計算邏輯
 
-**檔案**: `core/diagnostics.py`
+**檔案**: `src/lbm_taichi/core/diagnostics.py`
 
 **問題**:
 - 原始力計算邏輯的註解不夠清晰，容易誤解
@@ -32,7 +32,7 @@
 
 ### ✅ 2. 新增 CFL 條件檢查
 
-**檔案**: `core/lbm_solver.py`
+**檔案**: `src/lbm_taichi/core/lbm_solver.py`
 
 **問題**:
 - LBM 要求低 Mach 數（Ma < 0.3），否則違反不可壓假設
@@ -89,7 +89,7 @@ Parameter Validation (CFL & Mach Number Check)
 
 ### ✅ 3. 改進初始化策略（勢流初始化）
 
-**檔案**: `core/lbm_solver.py`
+**檔案**: `src/lbm_taichi/core/lbm_solver.py`
 
 **問題**:
 - 標準均勻場初始化 `u = (U∞, 0)` 在固體邊界不滿足邊界條件
@@ -141,7 +141,7 @@ solver.init_potential_flow_cylinder(cx=cx, cy=cy, radius=radius)
 
 ```bash
 # 使用新的勢流初始化
-python cases/flow_over_cylinder.py --res 128 --re 150 --steps 10000
+python examples/flow_over_cylinder.py --res 128 --re 150 --steps 10000
 
 # 預期結果：
 # - 初始 mass residual < 5e-3（舊版 ~2e-2）
@@ -198,17 +198,17 @@ solver = LBMSolver(nx=256, ny=256, re=100, u_ref=0.5)  # 超標！
 ## 📝 修改檔案清單
 
 ```
-core/lbm_solver.py
+src/lbm_taichi/core/lbm_solver.py
 ├── _validate_parameters()      [新增] CFL & Mach 檢查
 ├── _check_cfl_violation()       [新增] Runtime 檢查
 ├── check_cfl_condition()        [新增] 公開介面
 ├── init_potential_flow_cylinder() [新增] 勢流初始化
 └── _apply_velocity_field()      [新增] 速度場應用
 
-core/diagnostics.py
+src/lbm_taichi/core/diagnostics.py
 └── compute_forces()             [改進] 添加詳細註解
 
-cases/flow_over_cylinder.py
+examples/flow_over_cylinder.py
 ├── init_potential_flow_cylinder() [整合] 勢流初始化
 └── check_cfl_condition()        [整合] CFL 檢查
 ```

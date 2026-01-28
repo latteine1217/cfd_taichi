@@ -265,7 +265,7 @@ python tests/test_bc_improvements.py --test 3 --res 128
 
 ```bash
 # 週期邊界標準測試
-python cases/taylor_green_vortex.py --res 128 --steps 10000
+python examples/taylor_green_vortex.py --res 128 --steps 10000
 ```
 
 **預期輸出**：

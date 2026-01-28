@@ -24,7 +24,7 @@
 
 ### 1. 修正力係數計算邏輯
 **優先級**: 🔴 高
-**檔案**: `core/diagnostics.py`
+**檔案**: `src/lbm_taichi/core/diagnostics.py`
 
 **改進內容**:
 - 添加詳細的 Bounce-Back 動量交換物理解釋
@@ -42,7 +42,7 @@
 
 ### 2. 新增 CFL 條件檢查
 **優先級**: 🔴 高
-**檔案**: `core/lbm_solver.py`
+**檔案**: `src/lbm_taichi/core/lbm_solver.py`
 
 **改進內容**:
 - 初始化參數驗證（Mach 數、tau、Re）
@@ -72,7 +72,7 @@ Parameter Validation (CFL & Mach Number Check)
 
 ### 3. 改進初始化策略（勢流初始化 - 圓柱）
 **優先級**: 🔴 高
-**檔案**: `core/lbm_solver.py`
+**檔案**: `src/lbm_taichi/core/lbm_solver.py`
 
 **改進內容**:
 - 實作圓柱繞流勢流解析解
@@ -97,7 +97,7 @@ Parameter Validation (CFL & Mach Number Check)
 
 ### 4. 新增能量守恆監控
 **優先級**: 🟡 中
-**檔案**: `core/lbm_solver.py`, `core/diagnostics.py`
+**檔案**: `src/lbm_taichi/core/lbm_solver.py`, `src/lbm_taichi/core/diagnostics.py`
 
 **改進內容**:
 - 追蹤總動能 (KE = 0.5 * ρ * |u|²)
@@ -124,7 +124,7 @@ Energy Budget:
 
 ### 5. 輸出 Reynolds 應力（LES 驗證）
 **優先級**: 🟡 中
-**檔案**: `core/lbm_solver.py`, `utils/visualization.py`
+**檔案**: `src/lbm_taichi/core/lbm_solver.py`, `src/lbm_taichi/utils/visualization.py`
 
 **改進內容**:
 - 計算並儲存 Smagorinsky 渦黏度 (nu_sgs)
@@ -144,14 +144,14 @@ nu_sgs = (tau_eff - tau) / 3
 
 **使用範例**:
 ```bash
-python utils/visualization.py output_airfoil --type eddy_viscosity --gif
+python src/lbm_taichi/utils/visualization.py output_airfoil --type eddy_viscosity --gif
 ```
 
 ---
 
 ### 6. 實作機翼勢流初始化
 **優先級**: 🟡 中
-**檔案**: `core/lbm_solver.py`, `cases/airfoil.py`
+**檔案**: `src/lbm_taichi/core/lbm_solver.py`, `examples/airfoil.py`
 
 **改進內容**:
 - 考慮攻角與環量的勢流疊加
@@ -176,7 +176,7 @@ python utils/visualization.py output_airfoil --type eddy_viscosity --gif
 
 ### 7. 動態 Smagorinsky LES（Germano–Lilly）
 **優先級**: 🟡 中
-**檔案**: `core/lbm_solver.py`
+**檔案**: `src/lbm_taichi/core/lbm_solver.py`
 
 **改進內容**:
 - 以 Germano–Lilly 動態模型自動估計 Cs
@@ -190,9 +190,24 @@ python utils/visualization.py output_airfoil --type eddy_viscosity --gif
 
 ---
 
+### 10. 專案結構重整（套件化）
+**優先級**: 🟡 中
+**檔案**: `src/lbm_taichi/`, `examples/`, `run.py`
+
+**改進內容**:
+- 採用 `src/` layout，核心套件為 `lbm_taichi`
+- 案例腳本集中於 `examples/`
+- `run.py` 保留統一入口，但改用新匯入路徑
+
+**效果**:
+- ✅ 專案結構更清晰、易於擴展
+- ✅ 匯入路徑一致，避免隱式相對依賴
+
+---
+
 ### 8. MRT 鬆弛率與 τ_eff 一致性
 **優先級**: 🟡 中
-**檔案**: `core/lbm_solver.py`
+**檔案**: `src/lbm_taichi/core/lbm_solver.py`
 
 **改進內容**:
 - 對能量與 q 模式的鬆弛率依 `tau_eff` 做等比縮放
@@ -206,7 +221,7 @@ python utils/visualization.py output_airfoil --type eddy_viscosity --gif
 
 ### 9. 診斷標準化（網格無關）
 **優先級**: 🟡 中
-**檔案**: `core/diagnostics.py`
+**檔案**: `src/lbm_taichi/core/diagnostics.py`
 
 **改進內容**:
 - `macro_res` 以流體格點數平均
@@ -241,7 +256,7 @@ python utils/visualization.py output_airfoil --type eddy_viscosity --gif
 
 ### 測試 1: 圓柱繞流 (Re=150)
 ```bash
-python cases/flow_over_cylinder.py --res 128 --re 150 --steps 10000
+python examples/flow_over_cylinder.py --res 128 --re 150 --steps 10000
 ```
 
 **預期結果**:
@@ -252,7 +267,7 @@ python cases/flow_over_cylinder.py --res 128 --re 150 --steps 10000
 
 ### 測試 2: 機翼 (Re=1000, AoA=10°)
 ```bash
-python cases/airfoil.py --res 256 --re 1000 --aoa 10 --steps 5000
+python examples/airfoil.py --res 256 --re 1000 --aoa 10 --steps 5000
 ```
 
 **預期結果**:
@@ -273,7 +288,7 @@ solver = LBMSolver(nx=256, ny=256, re=100, u_ref=0.5)  # 超標！
 
 ### 核心求解器
 ```
-core/lbm_solver.py
+src/lbm_taichi/core/lbm_solver.py
 ├── _validate_parameters()           [新增] P0 - CFL 檢查
 ├── _check_cfl_violation()            [新增] P0 - Runtime 監控
 ├── check_cfl_condition()             [新增] P0 - 公開介面
@@ -288,26 +303,26 @@ core/lbm_solver.py
 
 ### 診斷系統
 ```
-core/diagnostics.py
+src/lbm_taichi/core/diagnostics.py
 ├── compute_forces()                  [改進] P0 - 詳細註解
 └── print_physics_validation()        [改進] P1 - 能量預算
 ```
 
 ### 可視化工具
 ```
-utils/visualization.py
+src/lbm_taichi/utils/visualization.py
 ├── plot_eddy_viscosity()             [新增] P1 - 渦黏度可視化
 └── process_all()                     [改進] P1 - 支援 nu_sgs
 ```
 
 ### 測試案例
 ```
-cases/flow_over_cylinder.py
+examples/flow_over_cylinder.py
 ├── init_potential_flow_cylinder()    [整合] P0 - 勢流初始化
 ├── check_cfl_condition()             [整合] P0 - CFL 檢查
 └── solver.initial_KE[None]           [整合] P1 - 能量初始化
 
-cases/airfoil.py
+examples/airfoil.py
 ├── init_potential_flow_airfoil()     [整合] P1 - 機翼勢流
 └── solver.initial_KE[None]           [整合] P1 - 能量初始化
 ```

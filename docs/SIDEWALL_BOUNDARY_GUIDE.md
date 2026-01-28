@@ -106,10 +106,10 @@
 
 ```bash
 # 默認配置（推薦）：開放空域
-python cases/flow_over_cylinder.py --sidewall outflow
+python examples/flow_over_cylinder.py --sidewall outflow
 
 # 風洞實驗對比：
-python cases/flow_over_cylinder.py --sidewall freeslip
+python examples/flow_over_cylinder.py --sidewall freeslip
 ```
 
 **推薦**：`--sidewall outflow`
@@ -123,10 +123,10 @@ python cases/flow_over_cylinder.py --sidewall freeslip
 
 ```bash
 # 默認配置（推薦）：開放空域（真實飛行）
-python cases/airfoil.py --sidewall outflow
+python examples/airfoil.py --sidewall outflow
 
 # 風洞實驗對比：
-python cases/airfoil.py --sidewall freeslip
+python examples/airfoil.py --sidewall freeslip
 ```
 
 **推薦**：`--sidewall outflow`
@@ -224,12 +224,12 @@ bc.add_neumann_outflow('bottom')
 
 ```bash
 # 測試 1：Free-Slip
-python cases/flow_over_cylinder.py \
+python examples/flow_over_cylinder.py \
     --res 128 --re 100 --sidewall freeslip \
     --output output_freeslip
 
 # 測試 2：Outflow
-python cases/flow_over_cylinder.py \
+python examples/flow_over_cylinder.py \
     --res 128 --re 100 --sidewall outflow \
     --output output_outflow
 
@@ -299,16 +299,16 @@ python compare_boundaries.py \
 
 ```bash
 # === 推薦配置（開放空域）===
-python cases/flow_over_cylinder.py --sidewall outflow --outflow pressure
-python cases/airfoil.py --sidewall outflow --outflow pressure
+python examples/flow_over_cylinder.py --sidewall outflow --outflow pressure
+python examples/airfoil.py --sidewall outflow --outflow pressure
 
 # === 風洞實驗配置 ===
-python cases/flow_over_cylinder.py --sidewall freeslip --outflow pressure
-python cases/airfoil.py --sidewall freeslip --outflow pressure
+python examples/flow_over_cylinder.py --sidewall freeslip --outflow pressure
+python examples/airfoil.py --sidewall freeslip --outflow pressure
 
 # === 實驗性配置（全 Neumann）===
-python cases/flow_over_cylinder.py --sidewall outflow --outflow neumann
-python cases/airfoil.py --sidewall outflow --outflow neumann
+python examples/flow_over_cylinder.py --sidewall outflow --outflow neumann
+python examples/airfoil.py --sidewall outflow --outflow neumann
 ```
 
 ---

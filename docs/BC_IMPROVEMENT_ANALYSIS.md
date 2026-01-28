@@ -518,7 +518,7 @@ python tests/test_mass_conservation.py --bc neumann --steps 50000
 
 ```bash
 # Re = 5000 圓柱繞流
-python cases/flow_over_cylinder.py --re 5000 --steps 20000
+python examples/flow_over_cylinder.py --re 5000 --steps 20000
 
 # 檢查：
 # - 是否出現振盪發散
@@ -529,7 +529,7 @@ python cases/flow_over_cylinder.py --re 5000 --steps 20000
 
 ```bash
 # Lid-Driven Cavity（小域 64×64）
-python cases/lid_driven_cavity.py --res 64
+python examples/lid_driven_cavity.py --res 64
 
 # 對比角點處理方案：
 # - 固體角點
