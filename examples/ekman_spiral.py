@@ -210,6 +210,41 @@ class MultiLayerEkmanSolver:
             # 初始速度 = 0，密度 = 1.0
             pass  # LBMSolver 預設已經是靜止
 
+    @ti.kernel
+    def _compute_coriolis_force_layer(
+        self,
+        k: ti.i32,
+        u_field: ti.template(),
+    ):
+        """
+        計算單層的科氏力
+
+        Physics:
+            F_coriolis = (f·v, -f·u)
+
+            北半球（f > 0）：
+            - 東向流（u > 0）產生南向力（Fy < 0）
+            - 北向流（v > 0）產生東向力（Fx > 0）
+            → 順時針偏轉
+
+        Args:
+            k: 層索引
+            u_field: 速度場（來自 LBMSolver.u）
+        """
+        for i, j in ti.ndrange(self.nx, self.ny):
+            # 從 LBMSolver 讀取速度（包含 ghost cells）
+            u_val = u_field[i + 1, j + 1][0]
+            v_val = u_field[i + 1, j + 1][1]
+
+            # 科氏力
+            self.coriolis_fx[k, i, j] = self.f * v_val
+            self.coriolis_fy[k, i, j] = -self.f * u_val
+
+    def _compute_coriolis_force(self):
+        """計算所有層的科氏力（呼叫 kernel）"""
+        for k in range(self.n_layers):
+            self._compute_coriolis_force_layer(k, self.layers[k].u)
+
     def step(self):
         """
         單步時間推進
@@ -279,3 +314,23 @@ if __name__ == "__main__":
     print(f"層厚: {solver.dz} m")
     print(f"科氏參數: {solver.f} s⁻¹")
     print("✅ 初始化成功")
+
+    # 設定表層速度為純東向流
+    solver.layers[0].u.fill(0.0)
+    for i in range(solver.nx):
+        for j in range(solver.ny):
+            solver.layers[0].u[i + 1, j + 1] = [0.1, 0.0]  # 東向 0.1 m/s
+
+    # 計算科氏力
+    solver._compute_coriolis_force()
+
+    # 檢查結果
+    fx = solver.coriolis_fx.to_numpy()
+    fy = solver.coriolis_fy.to_numpy()
+
+    print("\n=== 科氏力測試（東向流） ===")
+    print(f"Fx (應為 0): {fx[0, 0, 0]:.6f}")
+    print(f"Fy (應為 -f*u = -1e-5): {fy[0, 0, 0]:.6e}")
+    assert abs(fx[0, 0, 0]) < 1e-10, "Fx 應為 0"
+    assert abs(fy[0, 0, 0] - (-1.0e-5)) < 1e-10, "Fy 應為 -1e-5"
+    print("✅ 科氏力計算正確")
