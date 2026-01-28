@@ -245,6 +245,93 @@ class MultiLayerEkmanSolver:
         for k in range(self.n_layers):
             self._compute_coriolis_force_layer(k, self.layers[k].u)
 
+    def _compute_shear_stress(self):
+        """
+        計算層間剪應力（所有界面）
+
+        Physics:
+            τ(k→k+1) = ρ ν_v (u[k] - u[k+1]) / dz
+
+            界面編號：
+            - interface 0: 海洋表面（k=0 上方）
+            - interface k: 第 k-1 層與第 k 層之間
+            - interface n_layers: 海底（k=n_layers-1 下方）
+        """
+        # 頂層界面：風應力
+        self._set_wind_stress()
+
+        # 中間界面：黏性剪應力
+        for k in range(1, self.n_layers):
+            self._compute_viscous_stress_layer(
+                k, self.layers[k-1].u, self.layers[k].u
+            )
+
+        # 底層界面：底摩擦
+        self._set_bottom_friction()
+
+    @ti.kernel
+    def _set_wind_stress(self):
+        """設定頂層風應力"""
+        for i, j in ti.ndrange(self.nx, self.ny):
+            self.shear_stress_x[0, i, j] = self.tau_wind[0]
+            self.shear_stress_y[0, i, j] = self.tau_wind[1]
+
+    @ti.kernel
+    def _compute_viscous_stress_layer(
+        self, k: ti.i32, u_upper: ti.template(), u_lower: ti.template()
+    ):
+        """計算第 k 界面的黏性剪應力"""
+        for i, j in ti.ndrange(self.nx, self.ny):
+            u_u = u_upper[i + 1, j + 1][0]
+            v_u = u_upper[i + 1, j + 1][1]
+
+            u_l = u_lower[i + 1, j + 1][0]
+            v_l = u_lower[i + 1, j + 1][1]
+
+            du_dz = (u_u - u_l) / self.dz
+            dv_dz = (v_u - v_l) / self.dz
+
+            self.shear_stress_x[k, i, j] = self.rho * self.nu_v * du_dz
+            self.shear_stress_y[k, i, j] = self.rho * self.nu_v * dv_dz
+
+    @ti.kernel
+    def _set_bottom_friction(self):
+        """設定底層摩擦"""
+        for i, j in ti.ndrange(self.nx, self.ny):
+            u_bot = self.layers[self.n_layers - 1].u[i + 1, j + 1][0]
+            v_bot = self.layers[self.n_layers - 1].u[i + 1, j + 1][1]
+
+            # 線性拖曳：τ = -ρ r u dz
+            self.shear_stress_x[self.n_layers, i, j] = -self.rho * self.r_bottom * u_bot * self.dz
+            self.shear_stress_y[self.n_layers, i, j] = -self.rho * self.r_bottom * v_bot * self.dz
+
+    def _compute_total_force(self):
+        """
+        計算總外力 = 科氏力 + 剪應力梯度
+
+        Physics:
+            F_total = F_coriolis + (τ_top - τ_bottom) / (ρ dz)
+        """
+        for k in range(self.n_layers):
+            self._compute_force_layer(k)
+
+    @ti.kernel
+    def _compute_force_layer(self, k: ti.i32):
+        """計算第 k 層的總外力"""
+        for i, j in ti.ndrange(self.nx, self.ny):
+            # 剪應力梯度（轉換為單位質量力）
+            tau_top_x = self.shear_stress_x[k, i, j]
+            tau_bottom_x = self.shear_stress_x[k + 1, i, j]
+            F_shear_x = (tau_top_x - tau_bottom_x) / (self.rho * self.dz)
+
+            tau_top_y = self.shear_stress_y[k, i, j]
+            tau_bottom_y = self.shear_stress_y[k + 1, i, j]
+            F_shear_y = (tau_top_y - tau_bottom_y) / (self.rho * self.dz)
+
+            # 總外力
+            self.force_x[k, i, j] = self.coriolis_fx[k, i, j] + F_shear_x
+            self.force_y[k, i, j] = self.coriolis_fy[k, i, j] + F_shear_y
+
     def step(self):
         """
         單步時間推進
@@ -255,8 +342,41 @@ class MultiLayerEkmanSolver:
         3. 計算總外力
         4. 各層 LBM step（含外力）
         """
-        # 實現於 Task 3 & 4
-        pass
+        # 1. 科氏力
+        self._compute_coriolis_force()
+
+        # 2. 剪應力
+        self._compute_shear_stress()
+
+        # 3. 總外力
+        self._compute_total_force()
+
+        # 4. 各層時間推進
+        for k in range(self.n_layers):
+            # 將外力注入 LBM solver
+            self._inject_force_to_layer(k, self.layers[k].u)
+
+            # LBM step
+            if k % 2 == 0:
+                self.layers[k].step(self.layers[k].f, self.layers[k].f_new)
+            else:
+                self.layers[k].step(self.layers[k].f_new, self.layers[k].f)
+
+    @ti.kernel
+    def _inject_force_to_layer(self, k: ti.i32, u_field: ti.template()):
+        """
+        將外力注入第 k 層的 LBM 求解器
+
+        Method: 修改速度場（Guo's forcing scheme 簡化版）
+        """
+        for i, j in ti.ndrange(self.nx, self.ny):
+            fx = self.force_x[k, i, j]
+            fy = self.force_y[k, i, j]
+
+            # 施加外力（動量更新）
+            # Δu = F * Δt（LBM 中 Δt = 1）
+            u_field[i + 1, j + 1][0] += fx
+            u_field[i + 1, j + 1][1] += fy
 
     def get_velocity_profile(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -315,22 +435,26 @@ if __name__ == "__main__":
     print(f"科氏參數: {solver.f} s⁻¹")
     print("✅ 初始化成功")
 
-    # 設定表層速度為純東向流
+    # 測試剪應力計算
     solver.layers[0].u.fill(0.0)
+    solver.layers[1].u.fill(0.0)
+
+    # 設定速度梯度：第 0 層 u=0.1，第 1 層 u=0.0
     for i in range(solver.nx):
         for j in range(solver.ny):
-            solver.layers[0].u[i + 1, j + 1] = [0.1, 0.0]  # 東向 0.1 m/s
+            solver.layers[0].u[i + 1, j + 1] = [0.1, 0.0]
+            solver.layers[1].u[i + 1, j + 1] = [0.0, 0.0]
 
-    # 計算科氏力
-    solver._compute_coriolis_force()
+    solver._compute_shear_stress()
 
-    # 檢查結果
-    fx = solver.coriolis_fx.to_numpy()
-    fy = solver.coriolis_fy.to_numpy()
+    tau_x = solver.shear_stress_x.to_numpy()
 
-    print("\n=== 科氏力測試（東向流） ===")
-    print(f"Fx (應為 0): {fx[0, 0, 0]:.6f}")
-    print(f"Fy (應為 -f*u = -1e-5): {fy[0, 0, 0]:.6e}")
-    assert abs(fx[0, 0, 0]) < 1e-10, "Fx 應為 0"
-    assert abs(fy[0, 0, 0] - (-1.0e-5)) < 1e-10, "Fy 應為 -1e-5"
-    print("✅ 科氏力計算正確")
+    print("\n=== 剪應力測試 ===")
+    print(f"頂層界面（風應力）: {tau_x[0, 0, 0]:.4f} N/m²")
+    print(f"第 1 界面（黏性）: {tau_x[1, 0, 0]:.4f} N/m²")
+
+    # 理論值：τ = ρ ν_v Δu/dz = 1025 * 1e-3 * 0.1/5 = 0.0205
+    expected = 1025.0 * 1.0e-3 * 0.1 / 5.0
+    assert abs(tau_x[1, 0, 0] - expected) < 1e-6
+    print(f"理論值: {expected:.4f} N/m²")
+    print("✅ 剪應力計算正確")
