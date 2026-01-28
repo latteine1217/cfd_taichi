@@ -498,27 +498,78 @@ class MultiLayerEkmanSolver:
         self.layer_ke[k] = ke_sum / ti.cast(count, ti.f32)
 
 
-if __name__ == "__main__":
-    ti.init(arch=ti.metal, default_fp=ti.f32)
+def run_ekman_spiral(
+    n_layers: int = 20,
+    nx: int = 256,
+    ny: int = 256,
+    depth: float = 100.0,
+    latitude: float = 45.0,
+    U_10: float = 10.0,
+    nu_v: float = 1.0e-3,
+    r_bottom: float = 1.0e-4,
+    steps: int = 50000,
+    interval: int = 1000,
+    output_dir: str = "output_ekman",
+):
+    """
+    執行 Ekman 螺旋模擬
 
-    # 測試初始化
+    Args:
+        n_layers: 垂直層數
+        nx, ny: 水平網格尺寸
+        depth: 總深度 (m)
+        latitude: 緯度 (度)
+        U_10: 10m 風速 (m/s)
+        nu_v: 垂直渦黏度 (m²/s)
+        r_bottom: 底摩擦係數 (s⁻¹)
+        steps: 總時間步數
+        interval: 輸出間隔
+        output_dir: 輸出目錄
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    print("=" * 70)
+    print(" " * 15 + "EKMAN SPIRAL MULTI-LAYER SIMULATION")
+    print("=" * 70)
+
+    # === 物理參數 ===
+    dz = depth / n_layers
+    f = 2.0 * 7.2921e-5 * np.sin(np.radians(latitude))  # 科氏參數
+    tau_wind_mag = compute_wind_stress(U_10)
+    tau_wind = (tau_wind_mag, 0.0)  # 東風
+
+    D_E = compute_ekman_depth(f, nu_v)
+    T_i = 2.0 * np.pi / f  # 慣性週期 (s)
+    T_i_hr = T_i / 3600.0  # 轉為小時
+
+    print(f"\n=== 物理參數 ===")
+    print(f"緯度: {latitude}°")
+    print(f"科氏參數: {f:.6e} s⁻¹")
+    print(f"慣性週期: {T_i_hr:.2f} hr")
+    print(f"Ekman 深度: {D_E:.2f} m")
+    print(f"10m 風速: {U_10} m/s")
+    print(f"風應力: {tau_wind_mag:.4f} N/m²")
+    print(f"垂直渦黏度: {nu_v:.6e} m²/s")
+    print(f"底摩擦係數: {r_bottom:.6e} s⁻¹")
+
+    print(f"\n=== 網格參數 ===")
+    print(f"水平: {nx}×{ny}")
+    print(f"垂直: {n_layers} 層")
+    print(f"層厚: {dz:.2f} m")
+    print(f"總深度: {depth} m")
+
+    # === 初始化求解器 ===
     solver = MultiLayerEkmanSolver(
-        n_layers=20,
-        nx=32,
-        ny=32,
-        dz=5.0,
-        f=1.0e-4,
-        nu_v=1.0e-3,
-        tau_wind=(0.156, 0.0),  # 東風
-        r_bottom=1.0e-4,
+        n_layers=n_layers,
+        nx=nx,
+        ny=ny,
+        dz=dz,
+        f=f,
+        nu_v=nu_v,
+        tau_wind=tau_wind,
+        r_bottom=r_bottom,
+        re=1000.0,
     )
-
-    print("=== MultiLayerEkmanSolver 初始化測試 ===")
-    print(f"層數: {solver.n_layers}")
-    print(f"網格: {solver.nx}×{solver.ny}")
-    print(f"層厚: {solver.dz} m")
-    print(f"科氏參數: {solver.f} s⁻¹")
-    print("✅ 初始化成功")
 
     # 初始化各層的質量基準
     for k in range(solver.n_layers):
@@ -527,18 +578,127 @@ if __name__ == "__main__":
         solver.layers[k]._update_diagnostics()
         solver.layers[k].initial_mass[None] = solver.layers[k].total_mass[None]
 
-    # 測試診斷
-    print("\n=== 診斷系統測試 ===")
-    print("| step  | time(hr) | u_surf | angle_surf | u_bot  | KE_total | transport_angle | mass_err |")
+    # === 主迴圈 ===
+    print(f"\n=== 開始模擬 ===")
+    print("目標：3 個慣性週期（至穩態）")
+    print(f"預估模擬時間：{3.0 * T_i_hr:.1f} hr")
+
+    print("\n| step  | time(hr) | u_surf | angle_surf | u_bot  | KE_total | transport_angle | mass_err |")
     print("|-------|----------|--------|------------|--------|----------|-----------------|----------|")
 
-    solver.print_diagnostics(0, 0.0)
+    start_time = time.time()
 
-    # 測試多步運行
-    print("\n=== 短時間演化測試 ===")
-    for step in range(1, 11):
+    # 時間步長（LBM lattice time = 1）
+    # 假設 u_ref = 0.05 lattice units ≈ 0.05 m/s
+    # dt_physical ≈ dx_physical / u_ref = 1.0 / 0.05 = 20 s
+    dt_physical = 20.0  # 秒
+
+    for step in range(1, steps + 1):
         solver.step()
-        if step % 5 == 0:
-            solver.print_diagnostics(step, step * 1.0)  # 假設 dt=1 hr
 
-    print("\n✅ 診斷系統測試完成")
+        if step % interval == 0:
+            physical_time_hr = step * dt_physical / 3600.0
+            solver.print_diagnostics(step, physical_time_hr)
+
+            # 儲存狀態
+            save_state(solver, step, output_dir)
+
+    # === 總結 ===
+    elapsed = time.time() - start_time
+    print(f"\n--- 模擬完成，耗時 {elapsed:.2f} 秒 ---")
+
+    # 最終對比解析解
+    compare_with_analytical(solver, f, nu_v, tau_wind_mag, dz, output_dir)
+
+
+def save_state(solver: MultiLayerEkmanSolver, step: int, output_dir: str):
+    """儲存多層狀態"""
+    u_prof, v_prof = solver.get_velocity_profile()
+
+    state = {
+        'step': step,
+        'u_profile': u_prof,
+        'v_profile': v_prof,
+        'n_layers': solver.n_layers,
+        'dz': solver.dz,
+    }
+
+    filename = os.path.join(output_dir, f"state_{step:06d}.npy")
+    np.save(filename, state)
+
+
+def compare_with_analytical(
+    solver: MultiLayerEkmanSolver,
+    f: float,
+    nu_v: float,
+    tau_wind: float,
+    dz: float,
+    output_dir: str,
+):
+    """與解析解對比"""
+    u_num, v_num = solver.get_velocity_profile()
+
+    z_depths = np.arange(solver.n_layers) * dz
+    u_ana, v_ana = ekman_analytical_solution(z_depths, f, nu_v, tau_wind)
+
+    # 相對誤差
+    u_err = np.abs(u_num - u_ana) / (np.max(np.abs(u_ana)) + 1e-10)
+    v_err = np.abs(v_num - v_ana) / (np.max(np.abs(v_ana)) + 1e-10)
+
+    print(f"\n=== 與解析解對比 ===")
+    print(f"平均相對誤差（u）: {np.mean(u_err):.2%}")
+    print(f"平均相對誤差（v）: {np.mean(v_err):.2%}")
+    print(f"最大相對誤差（u）: {np.max(u_err):.2%}")
+    print(f"最大相對誤差（v）: {np.max(v_err):.2%}")
+
+    # 儲存對比數據
+    comparison = {
+        'z_depths': z_depths,
+        'u_numerical': u_num,
+        'v_numerical': v_num,
+        'u_analytical': u_ana,
+        'v_analytical': v_ana,
+        'u_error': u_err,
+        'v_error': v_err,
+    }
+
+    filename = os.path.join(output_dir, "comparison.npy")
+    np.save(filename, comparison)
+    print(f"對比數據已儲存至 {filename}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Ekman Spiral Multi-Layer Simulation")
+    parser.add_argument('--n_layers', type=int, default=20, help='垂直層數')
+    parser.add_argument('--nx', type=int, default=256, help='X 解析度')
+    parser.add_argument('--ny', type=int, default=256, help='Y 解析度')
+    parser.add_argument('--depth', type=float, default=100.0, help='總深度 (m)')
+    parser.add_argument('--latitude', type=float, default=45.0, help='緯度 (度)')
+    parser.add_argument('--U_10', type=float, default=10.0, help='10m 風速 (m/s)')
+    parser.add_argument('--nu_v', type=float, default=1.0e-3, help='垂直渦黏度 (m²/s)')
+    parser.add_argument('--r_bottom', type=float, default=1.0e-4, help='底摩擦係數 (s⁻¹)')
+    parser.add_argument('--steps', type=int, default=50000, help='總步數')
+    parser.add_argument('--interval', type=int, default=1000, help='輸出間隔')
+    parser.add_argument('--output', type=str, default='output_ekman', help='輸出目錄')
+
+    args = parser.parse_args()
+
+    ti.init(arch=ti.metal, default_fp=ti.f32)
+
+    run_ekman_spiral(
+        n_layers=args.n_layers,
+        nx=args.nx,
+        ny=args.ny,
+        depth=args.depth,
+        latitude=args.latitude,
+        U_10=args.U_10,
+        nu_v=args.nu_v,
+        r_bottom=args.r_bottom,
+        steps=args.steps,
+        interval=args.interval,
+        output_dir=args.output,
+    )
+
+
+if __name__ == "__main__":
+    main()
