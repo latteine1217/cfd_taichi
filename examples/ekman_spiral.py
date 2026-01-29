@@ -168,6 +168,39 @@ class MultiLayerEkmanSolver:
         self.rho = rho
         self.re = re
 
+        # === 單位轉換（Physical → Lattice）===
+        # LBM 使用 lattice units，物理外力需要轉換
+        self.u_ref = 0.05  # 參考速度尺度 (lattice units)
+
+        # 假設：dx_physical = 1m (網格間距)
+        # u_ref = 0.05 lattice units 對應物理速度 u_ref_physical
+        # 在我們的 LBM 實作中，u_ref 既是 lattice units 也是 physical units (1:1 mapping)
+        # 因此：u_ref_physical = 0.05 m/s
+
+        # 時間步長（物理）：
+        # dt_physical = dx_physical / u_ref_physical = 1.0 / 0.05 = 20 s
+        self.dt_physical = 1.0 / self.u_ref
+
+        # 外力轉換係數推導：
+        # Physical: Δu_physical = F_physical * Δt_physical (m/s)
+        # Lattice:  Δu_lattice = F_lattice * Δt_lattice (Δt_lattice = 1)
+        #
+        # 單位換算：
+        # u_physical [m/s] = u_lattice [dimensionless] * u_ref [m/s]
+        #
+        # 因此：
+        # Δu_physical = Δu_lattice * u_ref
+        # F_physical * dt_physical = F_lattice * 1 * u_ref
+        # F_lattice = F_physical * dt_physical / u_ref
+        #
+        # force_scale = dt_physical / u_ref = 20 / 0.05 = 400
+        self.force_scale = self.dt_physical / self.u_ref
+
+        print(f"[DEBUG] Unit conversion:")
+        print(f"  u_ref = {self.u_ref} m/s")
+        print(f"  dt_physical = {self.dt_physical} s")
+        print(f"  force_scale = {self.force_scale:.2f}")
+
         # 建立多層 LBM 求解器
         self.layers = []
         for k in range(n_layers):
@@ -175,12 +208,15 @@ class MultiLayerEkmanSolver:
                 nx=nx,
                 ny=ny,
                 re=re,
-                u_ref=0.05,  # 預估速度尺度
+                u_ref=self.u_ref,  # 使用統一的 u_ref
                 length_scale=float(ny),
                 cs=-1.0,  # 關閉 LES（使用外部渦黏度 nu_v）
                 collision_model="mrt",
             )
             self.layers.append(solver)
+
+        # 初始化所有層為靜止（覆蓋 LBMSolver 的默認初始化）
+        self._init_zero_velocity()
 
         # === Taichi 場變數 ===
         # 剪應力：每層上下界面（n_layers+1 個界面）
@@ -204,11 +240,38 @@ class MultiLayerEkmanSolver:
         self._init_layers()
 
     def _init_layers(self):
-        """初始化所有層為靜止海洋"""
-        for k, solver in enumerate(self.layers):
-            # 設定週期性邊界（無邊界條件）
-            # 初始速度 = 0，密度 = 1.0
-            pass  # LBMSolver 預設已經是靜止
+        """初始化所有層為靜止海洋（已棄用，使用 _init_zero_velocity）"""
+        pass
+
+    def _init_zero_velocity(self):
+        """強制初始化所有層速度為零"""
+        for k in range(self.n_layers):
+            self._init_layer_zero_velocity(k, self.layers[k].u, self.layers[k].f, self.layers[k].f_new)
+
+    @ti.kernel
+    def _init_layer_zero_velocity(
+        self,
+        k: ti.i32,
+        u_field: ti.template(),
+        f_field: ti.template(),
+        f_new_field: ti.template(),
+    ):
+        """初始化單層為零速度"""
+        # D2Q9 平衡態權重
+        w = ti.Vector([4.0/9.0, 1.0/9.0, 1.0/9.0, 1.0/9.0, 1.0/9.0,
+                       1.0/36.0, 1.0/36.0, 1.0/36.0, 1.0/36.0])
+        rho_init = 1.0
+
+        for i in range(-1, self.nx + 1):
+            for j in range(-1, self.ny + 1):
+                # 設置速度為零
+                u_field[i + 1, j + 1][0] = 0.0
+                u_field[i + 1, j + 1][1] = 0.0
+
+                # 從零速度重建分佈函數（平衡態，u=0）
+                for q in range(9):
+                    f_field[i + 1, j + 1][q] = w[q] * rho_init
+                    f_new_field[i + 1, j + 1][q] = w[q] * rho_init
 
     @ti.kernel
     def _compute_coriolis_force_layer(
@@ -319,7 +382,7 @@ class MultiLayerEkmanSolver:
     def _compute_force_layer(self, k: ti.i32):
         """計算第 k 層的總外力"""
         for i, j in ti.ndrange(self.nx, self.ny):
-            # 剪應力梯度（轉換為單位質量力）
+            # 剪應力梯度（轉換為單位質量力，物理單位 m/s²）
             tau_top_x = self.shear_stress_x[k, i, j]
             tau_bottom_x = self.shear_stress_x[k + 1, i, j]
             F_shear_x = (tau_top_x - tau_bottom_x) / (self.rho * self.dz)
@@ -328,55 +391,107 @@ class MultiLayerEkmanSolver:
             tau_bottom_y = self.shear_stress_y[k + 1, i, j]
             F_shear_y = (tau_top_y - tau_bottom_y) / (self.rho * self.dz)
 
-            # 總外力
-            self.force_x[k, i, j] = self.coriolis_fx[k, i, j] + F_shear_x
-            self.force_y[k, i, j] = self.coriolis_fy[k, i, j] + F_shear_y
+            # 總外力（物理單位 m/s²）
+            F_total_x = self.coriolis_fx[k, i, j] + F_shear_x
+            F_total_y = self.coriolis_fy[k, i, j] + F_shear_y
+
+            # 轉換為 lattice units
+            self.force_x[k, i, j] = F_total_x * self.force_scale
+            self.force_y[k, i, j] = F_total_y * self.force_scale
 
     def step(self):
         """
-        單步時間推進
+        單步時間推進（含外力）
 
         順序：
-        1. 計算科氏力
+        1. 計算科氏力（基於當前速度）
         2. 計算層間剪應力
         3. 計算總外力
-        4. 各層 LBM step（含外力）
+        4. 各層施加外力（修改速度場）
+        5. 各層 LBM step（基於修改後的速度）
+
+        Why 這個順序？
+        - 在 LBM step 之前施加外力
+        - LBM step 的 _update_macro 會從 f 重建速度
+        - 但我們在 step 前就修改了速度場，這會影響碰撞計算的平衡態
+        - 實際上這不完全正確，因為 _update_macro 會覆蓋修改
+
+        真正的解決方案（實施中）：
+        - 在 step 後修改速度場
+        - 然後從修改後的速度重建分佈函數（enforcing 新速度）
         """
-        # 1. 科氏力
+        # 1-3. 計算外力
         self._compute_coriolis_force()
-
-        # 2. 剪應力
         self._compute_shear_stress()
-
-        # 3. 總外力
         self._compute_total_force()
 
-        # 4. 各層時間推進
+        # 4. 各層 LBM step
         for k in range(self.n_layers):
-            # 將外力注入 LBM solver
-            self._inject_force_to_layer(k, self.layers[k].u)
-
-            # LBM step
             if k % 2 == 0:
                 self.layers[k].step(self.layers[k].f, self.layers[k].f_new)
             else:
                 self.layers[k].step(self.layers[k].f_new, self.layers[k].f)
 
-    @ti.kernel
-    def _inject_force_to_layer(self, k: ti.i32, u_field: ti.template()):
-        """
-        將外力注入第 k 層的 LBM 求解器
+        # 5. 施加外力並重建分佈函數
+        for k in range(self.n_layers):
+            f_target = self.layers[k].f_new if k % 2 == 0 else self.layers[k].f
+            self._apply_force_and_reconstruct(k, self.layers[k].u, self.layers[k].rho, f_target)
 
-        Method: 修改速度場（Guo's forcing scheme 簡化版）
+    @ti.kernel
+    def _apply_force_and_reconstruct(
+        self,
+        k: ti.i32,
+        u_field: ti.template(),
+        rho_field: ti.template(),
+        f_field: ti.template(),
+    ):
         """
+        施加外力並從新速度重建分佈函數
+
+        Method:
+        1. 修改速度場：u_new = u + F * dt
+        2. 從 u_new 和 rho 重建平衡態分佈函數
+        3. 更新 f = f_eq（強制執行新速度）
+
+        Why 這樣做？
+        - 簡單有效地將外力注入 LBM 動力學
+        - 缺點：不是嚴格的 Guo forcing scheme（會有小誤差）
+        - 優點：不需修改 LBMSolver 核心代碼
+        """
+        # D2Q9 lattice 速度
+        e_x = ti.Vector([0, 1, 0, -1, 0, 1, -1, -1, 1])
+        e_y = ti.Vector([0, 0, 1, 0, -1, 1, 1, -1, -1])
+        w = ti.Vector([4.0/9.0, 1.0/9.0, 1.0/9.0, 1.0/9.0, 1.0/9.0,
+                       1.0/36.0, 1.0/36.0, 1.0/36.0, 1.0/36.0])
+        cs_sq = 1.0 / 3.0
+
         for i, j in ti.ndrange(self.nx, self.ny):
+            # 1. 施加外力
             fx = self.force_x[k, i, j]
             fy = self.force_y[k, i, j]
 
-            # 施加外力（動量更新）
-            # Δu = F * Δt（LBM 中 Δt = 1）
-            u_field[i + 1, j + 1][0] += fx
-            u_field[i + 1, j + 1][1] += fy
+            u_old_x = u_field[i + 1, j + 1][0]
+            u_old_y = u_field[i + 1, j + 1][1]
+
+            u_new_x = u_old_x + fx  # dt = 1 in lattice units
+            u_new_y = u_old_y + fy
+
+            # 更新速度場
+            u_field[i + 1, j + 1][0] = u_new_x
+            u_field[i + 1, j + 1][1] = u_new_y
+
+            # 2. 從新速度重建平衡態
+            rho_local = rho_field[i + 1, j + 1]
+            u_sq = u_new_x**2 + u_new_y**2
+
+            for q in range(9):
+                e_dot_u = e_x[q] * u_new_x + e_y[q] * u_new_y
+                f_eq = w[q] * rho_local * (
+                    1.0 + e_dot_u / cs_sq
+                    + 0.5 * e_dot_u**2 / cs_sq**2
+                    - 0.5 * u_sq / cs_sq
+                )
+                f_field[i + 1, j + 1][q] = f_eq
 
     def compute_ekman_transport(self) -> Tuple[float, float, float]:
         """
@@ -434,13 +549,14 @@ class MultiLayerEkmanSolver:
                 errors[k] = 0.0
         return errors
 
-    def print_diagnostics(self, step: int, physical_time_hr: float):
+    def print_diagnostics(self, step: int, physical_time_hr: float, debug: bool = False):
         """
         輸出診斷資訊（模擬 Diagnostics 格式）
 
         Args:
             step: 時間步數
             physical_time_hr: 物理時間（小時）
+            debug: 是否輸出調試資訊
         """
         u_prof, v_prof = self.get_velocity_profile()
         u_surf = np.sqrt(u_prof[0]**2 + v_prof[0]**2)
@@ -458,6 +574,21 @@ class MultiLayerEkmanSolver:
             f"{angle_surf:6.1f}° | {u_bot:6.4f} | {ke_total:8.4f} | "
             f"{transport_angle:6.1f}° | {max_mass_error:8.2e} |"
         )
+
+        if debug and step > 0:
+            # 檢查外力大小
+            fx_layer0 = self.force_x.to_numpy()[0, 0, 0]
+            fy_layer0 = self.force_y.to_numpy()[0, 0, 0]
+            coriolis_fx = self.coriolis_fx.to_numpy()[0, 0, 0]
+            coriolis_fy = self.coriolis_fy.to_numpy()[0, 0, 0]
+            tau_top_x = self.shear_stress_x.to_numpy()[0, 0, 0]
+            tau_bottom_x = self.shear_stress_x.to_numpy()[1, 0, 0]
+
+            print(f"  [DEBUG] Layer 0 forces:")
+            print(f"    Wind stress (top): τ_x = {tau_top_x:.6e} N/m²")
+            print(f"    Shear stress (bottom): τ_x = {tau_bottom_x:.6e} N/m²")
+            print(f"    Coriolis force: f_x = {coriolis_fx:.6e} m/s²")
+            print(f"    Total force (lattice): F_x = {fx_layer0:.6e}, F_y = {fy_layer0:.6e}")
 
     def get_velocity_profile(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -496,6 +627,216 @@ class MultiLayerEkmanSolver:
         self.layer_u_mean[k] = u_sum / ti.cast(count, ti.f32)
         self.layer_v_mean[k] = v_sum / ti.cast(count, ti.f32)
         self.layer_ke[k] = ke_sum / ti.cast(count, ti.f32)
+
+
+def run_single_point_validation(
+    n_layers: int = 20,
+    depth: float = 100.0,
+    latitude: float = 45.0,
+    U_10: float = 10.0,
+    nu_v: float = 1.0e-3,
+    r_bottom: float = 1.0e-4,
+):
+    """
+    單點驗證模式（1×1 網格）
+
+    What: 退化為垂直一維問題，與 Ekman 解析解對比
+    Why: 驗證多層求解器的物理正確性
+    When: 開發測試、調試階段
+
+    驗收標準：
+    - 表面偏角 ≈ 45° (±5°)
+    - 傳輸角度 ≈ 90° (±10°)
+    - 速度誤差 < 10%
+
+    Args:
+        n_layers: 垂直層數
+        depth: 總深度 (m)
+        latitude: 緯度 (度)
+        U_10: 10m 風速 (m/s)
+        nu_v: 垂直渦黏度 (m²/s)
+        r_bottom: 底摩擦係數 (s⁻¹)
+    """
+    print("=" * 70)
+    print(" " * 18 + "SINGLE-POINT VALIDATION (1×1 Grid)")
+    print("=" * 70)
+
+    # === 物理參數 ===
+    dz = depth / n_layers
+    f = 2.0 * 7.2921e-5 * np.sin(np.radians(latitude))
+    tau_wind_mag = compute_wind_stress(U_10)
+    tau_wind = (tau_wind_mag, 0.0)  # 東風
+
+    D_E = compute_ekman_depth(f, nu_v)
+    T_i = 2.0 * np.pi / f  # 慣性週期 (s)
+    T_i_hr = T_i / 3600.0
+
+    print(f"\n=== 物理參數 ===")
+    print(f"緯度: {latitude}°")
+    print(f"科氏參數: {f:.6e} s⁻¹")
+    print(f"慣性週期: {T_i_hr:.2f} hr")
+    print(f"Ekman 深度: {D_E:.2f} m")
+    print(f"10m 風速: {U_10} m/s")
+    print(f"風應力: {tau_wind_mag:.4f} N/m²")
+    print(f"垂直渦黏度: {nu_v:.6e} m²/s")
+    print(f"底摩擦係數: {r_bottom:.6e} s⁻¹")
+
+    print(f"\n=== 網格參數 ===")
+    print(f"水平: 1×1 (單點驗證)")
+    print(f"垂直: {n_layers} 層")
+    print(f"層厚: {dz:.2f} m")
+    print(f"總深度: {depth} m")
+
+    # === 初始化求解器 ===
+    # 使用極大的 Re 數以最小化 LBM 的水平黏性耗散
+    # 物理垂直擴散由 nu_v 控制（通過層間剪應力）
+    # LBM 的 nu 應該 << nu_v，否則水平耗散會主導
+    #
+    # Re = u_ref * L / nu
+    # 選擇 Re = 9000 → tau = 0.5 + 3*nu = 0.5 + 3*(0.05*1/9000) = 0.5017 > 0.501 ✓
+    # nu_phys = (0.05/9000) * 1² / 20 = 2.78e-7 m²/s << nu_v = 1e-3 m²/s ✓
+    solver = MultiLayerEkmanSolver(
+        n_layers=n_layers,
+        nx=1,
+        ny=1,
+        dz=dz,
+        f=f,
+        nu_v=nu_v,
+        tau_wind=tau_wind,
+        r_bottom=r_bottom,
+        re=100.0,  # 確保 tau > 0.501 (tau = 0.5015)
+    )
+
+    # 初始化各層質量基準
+    for k in range(solver.n_layers):
+        f_src = solver.layers[k].f if k % 2 == 0 else solver.layers[k].f_new
+        solver.layers[k]._update_macro(f_src)
+        solver.layers[k]._update_diagnostics()
+        solver.layers[k].initial_mass[None] = solver.layers[k].total_mass[None]
+
+    # === 時間推進參數 ===
+    # 運行 3 個慣性週期至穩態
+    dt_physical = 20.0  # 秒
+    total_time = 3.0 * T_i  # 3 個慣性週期
+    total_steps = int(total_time / dt_physical)
+
+    print(f"\n=== 模擬設定 ===")
+    print(f"運行時長: 3.0 個慣性週期 ({3.0 * T_i_hr:.2f} hr)")
+    print(f"時間步長: {dt_physical} s")
+    print(f"總步數: {total_steps}")
+
+    print("\n| step  | time(hr) | u_surf | angle_surf | u_bot  | KE_total | transport_angle | mass_err |")
+    print("|-------|----------|--------|------------|--------|----------|-----------------|----------|")
+
+    start_time = time.time()
+    interval = max(1, total_steps // 20)  # 顯示 20 行
+
+    for step in range(1, total_steps + 1):
+        # 記錄施加外力前的速度
+        if step <= 5:
+            u_before = solver.layers[0].u.to_numpy()[1, 1][0]
+
+        solver.step()
+
+        # 記錄施加外力後的速度
+        if step <= 5:
+            u_after = solver.layers[0].u.to_numpy()[1, 1][0]
+            fx = solver.force_x.to_numpy()[0, 0, 0]
+            print(f"Step {step}: u_before={u_before:.6f}, u_after={u_after:.6f}, Δu={u_after-u_before:.6f}, F_x={fx:.6f}")
+
+        if step % interval == 0 or step == total_steps:
+            physical_time_hr = step * dt_physical / 3600.0
+            debug = (step == interval)  # 只在第一次輸出時顯示調試資訊
+            solver.print_diagnostics(step, physical_time_hr, debug=debug)
+
+    elapsed = time.time() - start_time
+    print(f"\n--- 模擬完成，耗時 {elapsed:.2f} 秒 ---")
+
+    # === 最終對比 ===
+    print(f"\n{'='*70}")
+    print(" " * 20 + "數值 vs 解析解對比")
+    print(f"{'='*70}")
+
+    u_num, v_num = solver.get_velocity_profile()
+    z_depths = np.arange(solver.n_layers) * dz
+    u_ana, v_ana = ekman_analytical_solution(z_depths, f, nu_v, tau_wind_mag)
+
+    # 表面速度對比
+    u_surf_num = u_num[0]
+    v_surf_num = v_num[0]
+    u_surf_ana = u_ana[0]
+    v_surf_ana = v_ana[0]
+
+    speed_surf_num = np.sqrt(u_surf_num**2 + v_surf_num**2)
+    speed_surf_ana = np.sqrt(u_surf_ana**2 + v_surf_ana**2)
+    angle_surf_num = np.degrees(np.arctan2(v_surf_num, u_surf_num))
+    angle_surf_ana = np.degrees(np.arctan2(v_surf_ana, u_surf_ana))
+
+    print(f"\n--- 表面流（k=0）---")
+    print(f"速度幅值：數值 = {speed_surf_num:.4f} m/s, 解析 = {speed_surf_ana:.4f} m/s")
+    print(f"速度誤差：{abs(speed_surf_num - speed_surf_ana) / speed_surf_ana * 100:.2f}%")
+    print(f"偏離角度：數值 = {angle_surf_num:.2f}°, 解析 = {angle_surf_ana:.2f}° (理論 45°)")
+    print(f"角度誤差：{abs(angle_surf_num - angle_surf_ana):.2f}°")
+
+    # Ekman 傳輸
+    M_x, M_y, transport_angle_num = solver.compute_ekman_transport()
+    M_x_ana = np.sum(u_ana) * dz
+    M_y_ana = np.sum(v_ana) * dz
+    transport_angle_ana = np.degrees(np.arctan2(M_y_ana, M_x_ana))
+
+    print(f"\n--- Ekman 傳輸 ---")
+    print(f"數值：M_x = {M_x:.4f}, M_y = {M_y:.4f}, 角度 = {transport_angle_num:.2f}°")
+    print(f"解析：M_x = {M_x_ana:.4f}, M_y = {M_y_ana:.4f}, 角度 = {transport_angle_ana:.2f}° (理論 90°)")
+    print(f"傳輸角度誤差：{abs(transport_angle_num - transport_angle_ana):.2f}°")
+
+    # 全剖面誤差
+    u_err = np.abs(u_num - u_ana) / (np.max(np.abs(u_ana)) + 1e-10)
+    v_err = np.abs(v_num - v_ana) / (np.max(np.abs(v_ana)) + 1e-10)
+    avg_err_u = np.mean(u_err) * 100
+    avg_err_v = np.mean(v_err) * 100
+
+    print(f"\n--- 垂直剖面（所有層）---")
+    print(f"平均相對誤差：u = {avg_err_u:.2f}%, v = {avg_err_v:.2f}%")
+    print(f"最大相對誤差：u = {np.max(u_err) * 100:.2f}%, v = {np.max(v_err) * 100:.2f}%")
+
+    # === 驗收判定 ===
+    print(f"\n{'='*70}")
+    print(" " * 25 + "驗收結果")
+    print(f"{'='*70}")
+
+    passed = True
+    threshold_angle_surf = 5.0  # 表面偏角容差 ±5°
+    threshold_angle_transport = 10.0  # 傳輸角度容差 ±10°
+    threshold_velocity = 10.0  # 速度誤差 < 10%
+
+    print(f"\n[1] 表面偏角（目標 45° ± {threshold_angle_surf}°）")
+    if abs(angle_surf_num - 45.0) <= threshold_angle_surf:
+        print(f"    ✅ PASS: 數值 {angle_surf_num:.2f}° (誤差 {abs(angle_surf_num - 45.0):.2f}°)")
+    else:
+        print(f"    ❌ FAIL: 數值 {angle_surf_num:.2f}° (誤差 {abs(angle_surf_num - 45.0):.2f}°)")
+        passed = False
+
+    print(f"\n[2] 傳輸角度（目標 90° ± {threshold_angle_transport}°）")
+    if abs(transport_angle_num - 90.0) <= threshold_angle_transport:
+        print(f"    ✅ PASS: 數值 {transport_angle_num:.2f}° (誤差 {abs(transport_angle_num - 90.0):.2f}°)")
+    else:
+        print(f"    ❌ FAIL: 數值 {transport_angle_num:.2f}° (誤差 {abs(transport_angle_num - 90.0):.2f}°)")
+        passed = False
+
+    print(f"\n[3] 速度誤差（目標 < {threshold_velocity}%）")
+    max_vel_err = max(avg_err_u, avg_err_v)
+    if max_vel_err <= threshold_velocity:
+        print(f"    ✅ PASS: 平均誤差 {max_vel_err:.2f}%")
+    else:
+        print(f"    ❌ FAIL: 平均誤差 {max_vel_err:.2f}%")
+        passed = False
+
+    print(f"\n{'='*70}")
+    if passed:
+        print(" " * 20 + "🎉 所有驗收標準通過！")
+    else:
+        print(" " * 20 + "⚠️  部分驗收標準未達標")
+    print(f"{'='*70}\n")
 
 
 def run_ekman_spiral(
@@ -669,6 +1010,7 @@ def compare_with_analytical(
 
 def main():
     parser = argparse.ArgumentParser(description="Ekman Spiral Multi-Layer Simulation")
+    parser.add_argument('--validate', action='store_true', help='運行單點驗證模式（1×1 網格）')
     parser.add_argument('--n_layers', type=int, default=20, help='垂直層數')
     parser.add_argument('--nx', type=int, default=256, help='X 解析度')
     parser.add_argument('--ny', type=int, default=256, help='Y 解析度')
@@ -685,19 +1027,31 @@ def main():
 
     ti.init(arch=ti.metal, default_fp=ti.f32)
 
-    run_ekman_spiral(
-        n_layers=args.n_layers,
-        nx=args.nx,
-        ny=args.ny,
-        depth=args.depth,
-        latitude=args.latitude,
-        U_10=args.U_10,
-        nu_v=args.nu_v,
-        r_bottom=args.r_bottom,
-        steps=args.steps,
-        interval=args.interval,
-        output_dir=args.output,
-    )
+    if args.validate:
+        # 運行單點驗證
+        run_single_point_validation(
+            n_layers=args.n_layers,
+            depth=args.depth,
+            latitude=args.latitude,
+            U_10=args.U_10,
+            nu_v=args.nu_v,
+            r_bottom=args.r_bottom,
+        )
+    else:
+        # 正常模擬
+        run_ekman_spiral(
+            n_layers=args.n_layers,
+            nx=args.nx,
+            ny=args.ny,
+            depth=args.depth,
+            latitude=args.latitude,
+            U_10=args.U_10,
+            nu_v=args.nu_v,
+            r_bottom=args.r_bottom,
+            steps=args.steps,
+            interval=args.interval,
+            output_dir=args.output,
+        )
 
 
 if __name__ == "__main__":
