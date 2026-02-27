@@ -43,3 +43,26 @@ def test_init_temperature_linear():
     assert abs(T_np[16, 1] - 1.0) < 0.05
     assert abs(T_np[16, 32] - 0.0) < 0.05
     assert abs(T_np[16, 16] - 0.5) < 0.1
+
+
+def test_thermal_step_preserves_uniform_temperature():
+    """均勻溫度場在靜止流場下，經過多步後應保持不變"""
+    ti.init(arch=ti.cpu, default_fp=ti.f32)
+    from lbm_taichi.core import LBMSolver
+    from lbm_taichi.core.thermal_module import ThermalModule
+
+    solver = LBMSolver(nx=16, ny=16, re=100.0, u_ref=0.05)
+    solver.u.fill(0.0)  # 靜止流場
+
+    thermal = ThermalModule(solver, Pr=0.71)
+    thermal._fill_equilibrium(0.7)  # 均勻溫度 0.7
+
+    for step in range(100):
+        g_src = thermal.g if step % 2 == 0 else thermal.g_new
+        g_dst = thermal.g_new if step % 2 == 0 else thermal.g
+        thermal.step(g_src, g_dst)
+
+    thermal._update_temperature(g_dst)
+    T_np = thermal.T.to_numpy()
+    T_inner = T_np[1:17, 1:17]
+    assert np.max(np.abs(T_inner - 0.7)) < 0.01

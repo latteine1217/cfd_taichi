@@ -89,6 +89,62 @@ class ThermalModule:
         """
         self._init_temperature_kernel(float(T_bot), float(T_top))
 
+    def step(self, g_src, g_dst):
+        """
+        執行溫度場單步推進（BGK 碰撞 + 串流）
+
+        Why 先 update_temperature 再 collision?
+        - 從 g_src 重算 T 確保每步一致性
+        - 避免上一步 BC 修改造成的 T 不一致
+        """
+        self._update_temperature(g_src)
+        self._thermal_collide_stream(g_src, g_dst)
+
+    @ti.kernel
+    def _update_temperature(self, g: ti.template()):
+        """從 g 分佈函數重算宏觀溫度"""
+        for i, j in ti.ndrange((1, self.nx + 1), (1, self.ny + 1)):
+            T_loc = 0.0
+            for k in ti.static(range(9)):
+                T_loc += g[i, j][k]
+            self.T[i, j] = T_loc
+
+    @ti.kernel
+    def _thermal_collide_stream(self, g_src: ti.template(), g_dst: ti.template()):
+        """
+        合併 BGK 碰撞與串流
+
+        Why 合併?: 減少記憶體讀寫，省去 g_post 緩衝場
+        Why BGK 而非 MRT?: 溫度方程只需 1 個鬆弛時間，MRT 不帶來額外收益
+
+        碰撞方程:
+            g_eq_α = T · w_α · (1 + e_α·u / cs²)
+            g_α*   = g_α - (g_α - g_eq_α) / τ_g
+        """
+        cs2 = 1.0 / 3.0
+        for i, j in ti.ndrange((1, self.nx + 1), (1, self.ny + 1)):
+            if self.solver.mask[i, j] == 1:
+                continue
+
+            T_loc = 0.0
+            for k in ti.static(range(9)):
+                T_loc += g_src[i, j][k]
+
+            ux = self.solver.u[i, j][0]
+            uy = self.solver.u[i, j][1]
+
+            for k in ti.static(range(9)):
+                ex = ti.cast(self.e[k][0], ti.f32)
+                ey = ti.cast(self.e[k][1], ti.f32)
+                eu = ex * ux + ey * uy
+                g_eq = self.w[k] * T_loc * (1.0 + eu / cs2)
+                g_post = g_src[i, j][k] - (g_src[i, j][k] - g_eq) / self.tau_g
+
+                # 串流至相鄰格點（ghost cells 作為緩衝，不會越界）
+                ni = i + self.e[k][0]
+                nj = j + self.e[k][1]
+                g_dst[ni, nj][k] = g_post
+
     @ti.kernel
     def _init_temperature_kernel(self, T_bot: ti.f32, T_top: ti.f32):
         """
