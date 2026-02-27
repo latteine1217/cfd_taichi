@@ -228,3 +228,41 @@ def test_adiabatic_wall_left():
     g_np = thermal.g.to_numpy()
     assert not np.any(np.isnan(g_np))
     assert not np.any(np.isinf(g_np))
+
+
+def test_nusselt_pure_conduction():
+    """
+    純導熱（靜止流場）穩態下 Nu ≈ 1.0
+
+    Why Nu=1 in pure conduction?
+        Nu = (actual heat flux) / (conductive heat flux)
+        在靜止流場，傳熱方式只有熱傳導，Nu 定義上等於 1.0
+    """
+    ti.init(arch=ti.cpu, default_fp=ti.f32)
+    from lbm_taichi.core import LBMSolver
+    from lbm_taichi.core.thermal_module import ThermalModule, ThermalBoundaryConditions
+
+    ny = 32
+    solver = LBMSolver(nx=32, ny=ny, re=100.0, u_ref=0.05, length_scale=float(ny))
+    solver.u.fill(0.0)  # 靜止流場
+
+    thermal = ThermalModule(solver, Pr=0.71)
+    thermal.init_temperature(T_bot=1.0, T_top=0.0)
+
+    tbc = ThermalBoundaryConditions(thermal)
+    tbc.add_hot_wall(T_hot=1.0, location='bottom')
+    tbc.add_cold_wall(T_cold=0.0, location='top')
+    tbc.add_adiabatic_wall('left')
+    tbc.add_adiabatic_wall('right')
+
+    # 跑到穩態（純導熱）
+    for step in range(5000):
+        g_src = thermal.g if step % 2 == 0 else thermal.g_new
+        g_dst = thermal.g_new if step % 2 == 0 else thermal.g
+        thermal.step(g_src, g_dst)
+        tbc.apply(g_dst)
+
+    thermal._update_temperature(g_dst)
+    nu = thermal.get_nusselt(T_bot=1.0, T_top=0.0)
+    # 純導熱 Nu ≈ 1.0（允許 ±20% 誤差）
+    assert abs(nu - 1.0) < 0.2, f"Nu = {nu:.3f}, expected ≈ 1.0"

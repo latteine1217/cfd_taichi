@@ -190,6 +190,49 @@ class ThermalModule:
                 F_y = rho_loc * self.g_gravity * self.beta * (T_loc - self.T_ref)
                 self.solver.force_field[i, j] = ti.Vector([0.0, F_y])
 
+    def get_nusselt(self, T_bot: float, T_top: float) -> float:
+        """
+        計算 Nusselt 數（使用中間截面的溫度梯度）
+
+        What: Nu = -H * mean(∂T/∂y|_{y=H/2}) / ΔT
+        Why 用中間截面?
+            - 避開壁面 BC 數值影響（壁面附近的梯度計算誤差較大）
+            - 穩態下各橫截面的熱通量守恆，中間截面最具代表性
+        Why 中心差分?
+            - 二階精度，不引入人工偏移
+
+        純導熱穩態: ∂T/∂y = -ΔT/H → Nu = 1
+
+        Args:
+            T_bot: 底壁溫度
+            T_top: 頂壁溫度
+
+        Returns:
+            float: Nusselt 數（純導熱=1.0，對流越強則越大）
+
+        Note: 呼叫前必須確保 self.T 已更新至最新時間步
+              （呼叫 self._update_temperature(g_dst)）
+        """
+        self.nu_sum[None] = 0.0
+        self._compute_nu_kernel()
+        mean_grad = self.nu_sum[None] / self.nx
+        delta_T = T_bot - T_top
+        H = self.ny
+        return float(-H * mean_grad / delta_T)
+
+    @ti.kernel
+    def _compute_nu_kernel(self):
+        """
+        計算中間截面（j=ny//2）的平均溫度梯度
+
+        使用中心差分：∂T/∂y|_{j} ≈ (T[i,j+1] - T[i,j-1]) / 2
+        結果累加至 self.nu_sum（再除以 nx 即為平均值）
+        """
+        j_mid = self.ny // 2
+        for i in range(1, self.nx + 1):
+            dT_dy = (self.T[i, j_mid + 1] - self.T[i, j_mid - 1]) / 2.0
+            ti.atomic_add(self.nu_sum[None], dT_dy)
+
     def register_with_solver(self):
         """
         將 compute_buoyancy 註冊為 solver 的 force_field_updater
