@@ -309,98 +309,143 @@ class ThermalBoundaryConditions:
     @ti.kernel
     def _apply_bottom_bc(self, g: ti.template()):
         """
-        底部壁面 BC（壁在 j=0，流體層在 j=1）
+        底部壁面 BC（壁在 j=0 外，流體層在 j=1）
 
-        Dirichlet（固定溫度）: 雙層方案
-          1. Ghost cell j=0 設為 T_wall 平衡態（供串流時正確提供壁面信息）
-          2. 流體第一層 j=1 全設平衡態，確保 sum(g[i,1]) = T_wall 立即成立
+        Dirichlet（Anti-Bounce-Back）:
+            只修正從底壁進入流體的未知方向 k=2(↑), 5(↗), 6(↖)
+            g_k(i,1) = -g_{inv[k]}(i,1) + 2·w_k·T_wall
 
-        Why 全部 9 個方向而非只設未知方向?
-          Anti-Bounce-Back 的收斂需要串流配合；在靜態 BC 測試（無串流）中，
-          反向分量 g[i,1][ik] 不自然更新，導致只修正 3 個方向後溫度不收斂。
-          設定全平衡態確保 sum(g) = T_wall 在每次 apply 後立即成立，
-          同時 ghost cell 保留物理正確的壁面信息供串流使用。
+            同時設定 ghost cell j=0 為壁面平衡態，確保下一步串流
+            從 ghost cell 帶入的值與壁面溫度一致（不污染 j=1 的平衡狀態）。
+            Ghost cell 不是流體格點，不參與碰撞，此設定只影響串流行為。
 
-        Neumann（絕熱）: 未知方向 Bounce-Back，ghost cell 維持當前值。
+        Neumann（絕熱, Bounce-Back）:
+            g_k(i,1) = g_{inv[k]}(i,1)  for k=2,5,6
 
         未知方向（從底壁進入流體）: k=2(↑), k=5(↗), k=6(↖)
+        inv 對應: inv[2]=4, inv[5]=7, inv[6]=8
         """
         T_wall = self.T_bottom[None]
         bc     = self.bc_bottom[None]
         for i in range(1, self.nx + 1):
-            if bc == 1:  # Dirichlet
-                for k in ti.static(range(9)):
-                    g[i, 0][k] = self.thermal.w[k] * T_wall  # ghost cell
-                    g[i, 1][k] = self.thermal.w[k] * T_wall  # 流體第一層
+            if bc == 1:  # Dirichlet: Anti-Bounce-Back
+                # 設定 ghost cell j=0 為壁面平衡態，確保下一步串流正確
+                for q in ti.static(range(9)):
+                    g[i, 0][q] = self.thermal.w[q] * T_wall
+                # 修正流體層 j=1 的未知方向（ABB）
+                # inv[2]=4, inv[5]=7, inv[6]=8（硬編碼 inv 避免 ti.static 的索引問題）
+                g[i, 1][2] = -g[i, 1][4] + 2.0 * self.thermal.w[2] * T_wall
+                g[i, 1][5] = -g[i, 1][7] + 2.0 * self.thermal.w[5] * T_wall
+                g[i, 1][6] = -g[i, 1][8] + 2.0 * self.thermal.w[6] * T_wall
             else:        # Neumann: Bounce-Back
-                for k in ti.static([2, 5, 6]):
-                    ik = self.thermal.inv[k]
-                    g[i, 1][k] = g[i, 1][ik]
+                # inv[2]=4, inv[5]=7, inv[6]=8
+                g[i, 1][2] = g[i, 1][4]
+                g[i, 1][5] = g[i, 1][7]
+                g[i, 1][6] = g[i, 1][8]
 
     @ti.kernel
     def _apply_top_bc(self, g: ti.template()):
         """
-        頂部壁面 BC（壁在 j=ny+1，流體層在 j=ny）
+        頂部壁面 BC（壁在 j=ny+1 外，流體層在 j=ny）
 
-        Dirichlet: ghost cell j=ny+1 + 流體層 j=ny 全設平衡態
-        Neumann: 未知方向 Bounce-Back
+        Dirichlet（Anti-Bounce-Back）:
+            只修正從頂壁進入流體的未知方向 k=4(↓), 7(↙), 8(↘)
+            g_k(i,ny) = -g_{inv[k]}(i,ny) + 2·w_k·T_wall
+
+            同時設定 ghost cell j=ny+1 為壁面平衡態，確保下一步串流正確。
+
+        Neumann（絕熱, Bounce-Back）:
+            g_k(i,ny) = g_{inv[k]}(i,ny)  for k=4,7,8
 
         未知方向（從頂壁進入流體）: k=4(↓), k=7(↙), k=8(↘)
+        inv 對應: inv[4]=2, inv[7]=5, inv[8]=6
         """
         T_wall = self.T_top[None]
         bc     = self.bc_top[None]
         ny     = self.ny
         for i in range(1, self.nx + 1):
-            if bc == 1:
-                for k in ti.static(range(9)):
-                    g[i, ny + 1][k] = self.thermal.w[k] * T_wall
-                    g[i, ny][k]     = self.thermal.w[k] * T_wall
-            else:
-                for k in ti.static([4, 7, 8]):
-                    ik = self.thermal.inv[k]
-                    g[i, ny][k] = g[i, ny][ik]
+            if bc == 1:  # Dirichlet: Anti-Bounce-Back
+                # 設定 ghost cell j=ny+1 為壁面平衡態
+                for q in ti.static(range(9)):
+                    g[i, ny + 1][q] = self.thermal.w[q] * T_wall
+                # 修正流體層 j=ny 的未知方向（ABB）
+                # inv[4]=2, inv[7]=5, inv[8]=6（硬編碼 inv 避免 ti.static 的索引問題）
+                g[i, ny][4] = -g[i, ny][2] + 2.0 * self.thermal.w[4] * T_wall
+                g[i, ny][7] = -g[i, ny][5] + 2.0 * self.thermal.w[7] * T_wall
+                g[i, ny][8] = -g[i, ny][6] + 2.0 * self.thermal.w[8] * T_wall
+            else:        # Neumann: Bounce-Back
+                # inv[4]=2, inv[7]=5, inv[8]=6
+                g[i, ny][4] = g[i, ny][2]
+                g[i, ny][7] = g[i, ny][5]
+                g[i, ny][8] = g[i, ny][6]
 
     @ti.kernel
     def _apply_left_bc(self, g: ti.template()):
         """
-        左壁 BC（壁在 i=0，流體層在 i=1）
+        左壁 BC（壁在 i=0 外，流體層在 i=1）
 
-        Dirichlet: ghost cell i=0 + 流體層 i=1 全設平衡態
-        Neumann: 未知方向 Bounce-Back
+        Dirichlet（Anti-Bounce-Back）:
+            只修正從左壁進入流體的未知方向 k=1(→), 5(↗), 8(↘)
+            g_k(1,j) = -g_{inv[k]}(1,j) + 2·w_k·T_wall
+
+            同時設定 ghost cell i=0 為壁面平衡態，確保下一步串流正確。
+
+        Neumann（絕熱, Bounce-Back）:
+            g_k(1,j) = g_{inv[k]}(1,j)  for k=1,5,8
 
         未知方向（從左壁進入流體）: k=1(→), k=5(↗), k=8(↘)
+        inv 對應: inv[1]=3, inv[5]=7, inv[8]=6
         """
         T_wall = self.T_left[None]
         bc     = self.bc_left[None]
         for j in range(1, self.ny + 1):
-            if bc == 1:
-                for k in ti.static(range(9)):
-                    g[0, j][k] = self.thermal.w[k] * T_wall
-                    g[1, j][k] = self.thermal.w[k] * T_wall
-            else:
-                for k in ti.static([1, 5, 8]):
-                    ik = self.thermal.inv[k]
-                    g[1, j][k] = g[1, j][ik]
+            if bc == 1:  # Dirichlet: Anti-Bounce-Back
+                # 設定 ghost cell i=0 為壁面平衡態
+                for q in ti.static(range(9)):
+                    g[0, j][q] = self.thermal.w[q] * T_wall
+                # 修正流體層 i=1 的未知方向（ABB）
+                # inv[1]=3, inv[5]=7, inv[8]=6（硬編碼 inv 避免 ti.static 的索引問題）
+                g[1, j][1] = -g[1, j][3] + 2.0 * self.thermal.w[1] * T_wall
+                g[1, j][5] = -g[1, j][7] + 2.0 * self.thermal.w[5] * T_wall
+                g[1, j][8] = -g[1, j][6] + 2.0 * self.thermal.w[8] * T_wall
+            else:        # Neumann: Bounce-Back
+                # inv[1]=3, inv[5]=7, inv[8]=6
+                g[1, j][1] = g[1, j][3]
+                g[1, j][5] = g[1, j][7]
+                g[1, j][8] = g[1, j][6]
 
     @ti.kernel
     def _apply_right_bc(self, g: ti.template()):
         """
-        右壁 BC（壁在 i=nx+1，流體層在 i=nx）
+        右壁 BC（壁在 i=nx+1 外，流體層在 i=nx）
 
-        Dirichlet: ghost cell i=nx+1 + 流體層 i=nx 全設平衡態
-        Neumann: 未知方向 Bounce-Back
+        Dirichlet（Anti-Bounce-Back）:
+            只修正從右壁進入流體的未知方向 k=3(←), 6(↖), 7(↙)
+            g_k(nx,j) = -g_{inv[k]}(nx,j) + 2·w_k·T_wall
+
+            同時設定 ghost cell i=nx+1 為壁面平衡態，確保下一步串流正確。
+
+        Neumann（絕熱, Bounce-Back）:
+            g_k(nx,j) = g_{inv[k]}(nx,j)  for k=3,6,7
 
         未知方向（從右壁進入流體）: k=3(←), k=6(↖), k=7(↙)
+        inv 對應: inv[3]=1, inv[6]=8, inv[7]=5
         """
         T_wall = self.T_right[None]
         bc     = self.bc_right[None]
         nx     = self.nx
         for j in range(1, self.ny + 1):
-            if bc == 1:
-                for k in ti.static(range(9)):
-                    g[nx + 1, j][k] = self.thermal.w[k] * T_wall
-                    g[nx, j][k]     = self.thermal.w[k] * T_wall
-            else:
-                for k in ti.static([3, 6, 7]):
-                    ik = self.thermal.inv[k]
-                    g[nx, j][k] = g[nx, j][ik]
+            if bc == 1:  # Dirichlet: Anti-Bounce-Back
+                # 設定 ghost cell i=nx+1 為壁面平衡態
+                for q in ti.static(range(9)):
+                    g[nx + 1, j][q] = self.thermal.w[q] * T_wall
+                # 修正流體層 i=nx 的未知方向（ABB）
+                # inv[3]=1, inv[6]=8, inv[7]=5（硬編碼 inv 避免 ti.static 的索引問題）
+                g[nx, j][3] = -g[nx, j][1] + 2.0 * self.thermal.w[3] * T_wall
+                g[nx, j][6] = -g[nx, j][8] + 2.0 * self.thermal.w[6] * T_wall
+                g[nx, j][7] = -g[nx, j][5] + 2.0 * self.thermal.w[7] * T_wall
+            else:        # Neumann: Bounce-Back
+                # inv[3]=1, inv[6]=8, inv[7]=5
+                g[nx, j][3] = g[nx, j][1]
+                g[nx, j][6] = g[nx, j][8]
+                g[nx, j][7] = g[nx, j][5]

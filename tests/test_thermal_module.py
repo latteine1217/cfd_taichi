@@ -164,26 +164,50 @@ def test_buoyancy_positive_above_T_ref():
 
 
 def test_hot_wall_bottom_sets_temperature():
-    """底部熱壁應讓 j=1 的溫度趨近 T_hot"""
+    """
+    底部熱壁施加 Dirichlet BC（Anti-Bounce-Back），
+    多步串流後 j=1 的溫度應趨近 T_hot=1.0，頂部冷壁應趨近 T_cold=0.0
+
+    Why 需要串流？Anti-Bounce-Back 只修正未知方向（k=2,5,6），
+    其餘方向由串流帶入，因此需要至少幾步串流後才能在 j=1 見到效果。
+
+    Why length_scale=ny？
+    LBMSolver 預設 length_scale = ny/9，導致 nu 極小（≈ 8.9e-4）、
+    tau_g ≈ 0.504，接近穩定下限。顯式設定 length_scale=ny 使
+    nu = u_ref * ny / re = 0.05 * 16 / 100 = 0.008，
+    tau_g = 0.5 + 3*(0.008/0.71) ≈ 0.534，處於穩定範圍。
+    """
     ti.init(arch=ti.cpu, default_fp=ti.f32)
     from lbm_taichi.core import LBMSolver
     from lbm_taichi.core.thermal_module import ThermalModule, ThermalBoundaryConditions
 
-    solver = LBMSolver(nx=16, ny=16, re=100.0, u_ref=0.05)
+    solver = LBMSolver(nx=16, ny=16, re=100.0, u_ref=0.05, length_scale=16)
+    solver.u.fill(0.0)  # 靜止流場
     thermal = ThermalModule(solver, Pr=0.71)
-    thermal._fill_equilibrium(0.5)
+    # 確保 tau_g 穩定（期望 > 0.51）
+    assert thermal.tau_g > 0.51, f"tau_g={thermal.tau_g:.4f} 過小，測試設定有誤"
+    thermal._fill_equilibrium(0.5)  # 初始均勻溫度 0.5
 
     tbc = ThermalBoundaryConditions(thermal)
     tbc.add_hot_wall(T_hot=1.0, location='bottom')
+    tbc.add_cold_wall(T_cold=0.0, location='top')
 
-    # 施加 BC 多次讓溫度收斂
-    for _ in range(50):
-        tbc.apply(thermal.g)
-        thermal._update_temperature(thermal.g)
+    # 執行多步（串流 + BC 施加），讓溫度邊界效果傳播
+    g_dst = thermal.g
+    for step in range(200):
+        g_src = thermal.g if step % 2 == 0 else thermal.g_new
+        g_dst = thermal.g_new if step % 2 == 0 else thermal.g
+        thermal.step(g_src, g_dst)   # 串流
+        tbc.apply(g_dst)              # 施加 BC
 
+    thermal._update_temperature(g_dst)
     T_np = thermal.T.to_numpy()
-    # j=1 的平均溫度應接近 1.0
-    assert np.mean(T_np[1:17, 1]) > 0.9
+    # 底部（j=1）應接近 T_hot=1.0
+    assert np.mean(T_np[1:17, 1]) > 0.8, \
+        f"Bottom wall temp={np.mean(T_np[1:17, 1]):.4f} should be > 0.8"
+    # 頂部（j=16）應接近 T_cold=0.0
+    assert np.mean(T_np[1:17, 16]) < 0.2, \
+        f"Top wall temp={np.mean(T_np[1:17, 16]):.4f} should be < 0.2"
 
 
 def test_adiabatic_wall_left():
