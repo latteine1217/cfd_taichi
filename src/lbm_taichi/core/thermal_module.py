@@ -96,6 +96,12 @@ class ThermalModule:
         Why 先 update_temperature 再 collision?
         - 從 g_src 重算 T 確保每步一致性
         - 避免上一步 BC 修改造成的 T 不一致
+
+        【注意 self.T 時序語義】
+        呼叫 step(g_src, g_dst) 後，self.T 對應 g_src 的溫度（前一時間步）。
+        若需要 g_dst 對應的最新溫度，請手動呼叫：
+            thermal._update_temperature(g_dst)
+        例如：在可視化或 Nusselt 數計算前需更新。
         """
         self._update_temperature(g_src)
         self._thermal_collide_stream(g_src, g_dst)
@@ -124,8 +130,13 @@ class ThermalModule:
         cs2 = 1.0 / 3.0
         for i, j in ti.ndrange((1, self.nx + 1), (1, self.ny + 1)):
             if self.solver.mask[i, j] == 1:
+                # TODO: 固體熱邊界由上層 ThermalBoundaryConditions 處理
+                #       （熱 Bounce-Back 或 Dirichlet g_dst），此處 continue 僅防止固體
+                #       向外串流，固體內 g_dst 由 BC 負責重建。（Task 4 實作）
                 continue
 
+            # TODO: 效率優化：可改用 self.T[i, j]（已由 _update_temperature 計算，
+            #       節省每節點 8 次 f32 讀取）。目前保持獨立計算以利可讀性。
             T_loc = 0.0
             for k in ti.static(range(9)):
                 T_loc += g_src[i, j][k]
@@ -144,6 +155,54 @@ class ThermalModule:
                 ni = i + self.e[k][0]
                 nj = j + self.e[k][1]
                 g_dst[ni, nj][k] = g_post
+
+    def compute_buoyancy(self):
+        """
+        計算浮力並更新 solver.force_field
+
+        What: 計算 Boussinesq 浮力場並寫入 solver.force_field
+        Why:  透過 force_field 保持與 LBMSolver Guo forcing scheme 的相容性；
+              此函式由 solver.force_field_updater 每步自動呼叫，
+              確保浮力使用最新溫度場（T 在流場計算前更新）
+
+        呼叫時序: solver.step() → force_field_updater() → compute_buoyancy()
+                  → 更新 force_field → 碰撞串流使用最新浮力
+        """
+        self._compute_buoyancy_kernel()
+
+    @ti.kernel
+    def _compute_buoyancy_kernel(self):
+        """
+        Boussinesq 浮力: F_y = ρ · g_gravity · β · (T - T_ref)
+
+        Why Boussinesq?
+            密度變化只在浮力項計入，流場仍視為不可壓縮。
+            在 |T - T_ref| << T_ref 時近似有效。
+        Why ρ 乘?
+            LBM 中 force_field 是體積力密度（力/體積），即加速度 × ρ
+        """
+        for i, j in ti.ndrange((1, self.nx + 1), (1, self.ny + 1)):
+            if self.solver.mask[i, j] == 1:
+                self.solver.force_field[i, j] = ti.Vector([0.0, 0.0])
+            else:
+                T_loc = self.T[i, j]
+                rho_loc = self.solver.rho[i, j]
+                F_y = rho_loc * self.g_gravity * self.beta * (T_loc - self.T_ref)
+                self.solver.force_field[i, j] = ti.Vector([0.0, F_y])
+
+    def register_with_solver(self):
+        """
+        將 compute_buoyancy 註冊為 solver 的 force_field_updater
+
+        What: 讓 solver.step() 在每步開頭自動呼叫 compute_buoyancy()
+        Why:  solver.set_force_field_updater() 同時設定 force_field_enabled=1
+              和呼叫 _refresh_force_enabled()，確保浮力生效
+
+        使用方法:
+            thermal.register_with_solver()
+            # 之後 solver.step() 每步自動更新浮力
+        """
+        self.solver.set_force_field_updater(self.compute_buoyancy)
 
     @ti.kernel
     def _init_temperature_kernel(self, T_bot: ti.f32, T_top: ti.f32):
