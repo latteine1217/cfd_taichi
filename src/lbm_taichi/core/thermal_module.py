@@ -267,6 +267,17 @@ class ThermalBoundaryConditions:
         for f in [self.T_bottom, self.T_top, self.T_left, self.T_right]:
             f[None] = 0.0
 
+        # 驗證硬編碼 inv 常數與 solver.inv 一致（防止 D2Q9 定義變更時的 silent bug）
+        # NOTE: 各壁面 kernel 因 Taichi 1.7.4 的 ti.static+field 索引 bug 改用硬編碼，
+        #       升級 Taichi 後可改回動態索引並移除此 assert
+        _expected_inv = [0, 3, 4, 1, 2, 7, 8, 5, 6]
+        for _k in range(9):
+            assert thermal.inv[_k] == _expected_inv[_k], (
+                f"ThermalBoundaryConditions: inv[{_k}] = {thermal.inv[_k]}, "
+                f"expected {_expected_inv[_k]}. "
+                f"BC kernels use hardcoded inv — update ThermalBoundaryConditions if D2Q9 inv changes."
+            )
+
     def add_hot_wall(self, T_hot: float, location: str):
         """固定高溫壁（Dirichlet，Anti-Bounce-Back）"""
         self._set_wall(location, bc_type=1, T_val=T_hot)
@@ -333,6 +344,7 @@ class ThermalBoundaryConditions:
                 for q in ti.static(range(9)):
                     g[i, 0][q] = self.thermal.w[q] * T_wall
                 # 修正流體層 j=1 的未知方向（ABB）
+                # TODO: Taichi > 1.7.4 修復後改回動態 inv 索引；見 __init__ 中的 NOTE
                 # inv[2]=4, inv[5]=7, inv[6]=8（硬編碼 inv 避免 ti.static 的索引問題）
                 g[i, 1][2] = -g[i, 1][4] + 2.0 * self.thermal.w[2] * T_wall
                 g[i, 1][5] = -g[i, 1][7] + 2.0 * self.thermal.w[5] * T_wall
@@ -369,6 +381,7 @@ class ThermalBoundaryConditions:
                 for q in ti.static(range(9)):
                     g[i, ny + 1][q] = self.thermal.w[q] * T_wall
                 # 修正流體層 j=ny 的未知方向（ABB）
+                # TODO: 同底壁，Taichi bug workaround
                 # inv[4]=2, inv[7]=5, inv[8]=6（硬編碼 inv 避免 ti.static 的索引問題）
                 g[i, ny][4] = -g[i, ny][2] + 2.0 * self.thermal.w[4] * T_wall
                 g[i, ny][7] = -g[i, ny][5] + 2.0 * self.thermal.w[7] * T_wall
@@ -404,6 +417,7 @@ class ThermalBoundaryConditions:
                 for q in ti.static(range(9)):
                     g[0, j][q] = self.thermal.w[q] * T_wall
                 # 修正流體層 i=1 的未知方向（ABB）
+                # TODO: 同底壁，Taichi bug workaround
                 # inv[1]=3, inv[5]=7, inv[8]=6（硬編碼 inv 避免 ti.static 的索引問題）
                 g[1, j][1] = -g[1, j][3] + 2.0 * self.thermal.w[1] * T_wall
                 g[1, j][5] = -g[1, j][7] + 2.0 * self.thermal.w[5] * T_wall
@@ -440,6 +454,7 @@ class ThermalBoundaryConditions:
                 for q in ti.static(range(9)):
                     g[nx + 1, j][q] = self.thermal.w[q] * T_wall
                 # 修正流體層 i=nx 的未知方向（ABB）
+                # TODO: 同底壁，Taichi bug workaround
                 # inv[3]=1, inv[6]=8, inv[7]=5（硬編碼 inv 避免 ti.static 的索引問題）
                 g[nx, j][3] = -g[nx, j][1] + 2.0 * self.thermal.w[3] * T_wall
                 g[nx, j][6] = -g[nx, j][8] + 2.0 * self.thermal.w[6] * T_wall
