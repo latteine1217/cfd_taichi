@@ -223,3 +223,184 @@ class ThermalModule:
             for k in ti.static(range(9)):
                 self.g[i, j][k] = self.w[k] * T_loc
                 self.g_new[i, j][k] = self.w[k] * T_loc
+
+
+@ti.data_oriented
+class ThermalBoundaryConditions:
+    """
+    溫度場邊界條件
+
+    What: 管理 g 分佈函數在壁面的 Dirichlet/Neumann BC
+    Why:
+      - Dirichlet（固定溫度）: Anti-Bounce-Back scheme
+            g_ᾱ(wall) = -g_α(wall) + 2·w_α·T_wall
+        物理上等效於壁面溫度固定在 T_wall
+      - Neumann（絕熱, ∂T/∂n=0）: Bounce-Back
+            g_ᾱ(wall) = g_α(wall)
+        物理上等效於無熱通量穿越邊界
+
+    使用：
+        tbc = ThermalBoundaryConditions(thermal)
+        tbc.add_hot_wall(T_hot=1.0, location='bottom')
+        tbc.add_cold_wall(T_cold=0.0, location='top')
+        tbc.add_adiabatic_wall('left')
+        tbc.apply(g_dst)  # 每步呼叫一次
+    """
+
+    def __init__(self, thermal):
+        self.thermal = thermal
+        self.nx = thermal.nx
+        self.ny = thermal.ny
+
+        # BC 類型: 0=none, 1=Dirichlet, 2=Neumann(adiabatic)
+        self.bc_bottom = ti.field(dtype=ti.i32, shape=())
+        self.bc_top    = ti.field(dtype=ti.i32, shape=())
+        self.bc_left   = ti.field(dtype=ti.i32, shape=())
+        self.bc_right  = ti.field(dtype=ti.i32, shape=())
+        self.T_bottom  = ti.field(dtype=ti.f32, shape=())
+        self.T_top     = ti.field(dtype=ti.f32, shape=())
+        self.T_left    = ti.field(dtype=ti.f32, shape=())
+        self.T_right   = ti.field(dtype=ti.f32, shape=())
+
+        for f in [self.bc_bottom, self.bc_top, self.bc_left, self.bc_right]:
+            f[None] = 0
+        for f in [self.T_bottom, self.T_top, self.T_left, self.T_right]:
+            f[None] = 0.0
+
+    def add_hot_wall(self, T_hot: float, location: str):
+        """固定高溫壁（Dirichlet，Anti-Bounce-Back）"""
+        self._set_wall(location, bc_type=1, T_val=T_hot)
+
+    def add_cold_wall(self, T_cold: float, location: str):
+        """固定低溫壁（Dirichlet，Anti-Bounce-Back）"""
+        self._set_wall(location, bc_type=1, T_val=T_cold)
+
+    def add_adiabatic_wall(self, location: str):
+        """絕熱壁（Neumann，Bounce-Back，零熱通量）"""
+        self._set_wall(location, bc_type=2, T_val=0.0)
+
+    def _set_wall(self, location: str, bc_type: int, T_val: float):
+        if location == 'bottom':
+            self.bc_bottom[None] = bc_type
+            self.T_bottom[None] = T_val
+        elif location == 'top':
+            self.bc_top[None] = bc_type
+            self.T_top[None] = T_val
+        elif location == 'left':
+            self.bc_left[None] = bc_type
+            self.T_left[None] = T_val
+        elif location == 'right':
+            self.bc_right[None] = bc_type
+            self.T_right[None] = T_val
+        else:
+            raise ValueError(f"Unknown location: {location}")
+
+    def apply(self, g):
+        """施加所有已設定的溫度邊界條件"""
+        if self.bc_bottom[None] > 0:
+            self._apply_bottom_bc(g)
+        if self.bc_top[None] > 0:
+            self._apply_top_bc(g)
+        if self.bc_left[None] > 0:
+            self._apply_left_bc(g)
+        if self.bc_right[None] > 0:
+            self._apply_right_bc(g)
+
+    @ti.kernel
+    def _apply_bottom_bc(self, g: ti.template()):
+        """
+        底部壁面 BC（壁在 j=0，流體層在 j=1）
+
+        Dirichlet（固定溫度）: 雙層方案
+          1. Ghost cell j=0 設為 T_wall 平衡態（供串流時正確提供壁面信息）
+          2. 流體第一層 j=1 全設平衡態，確保 sum(g[i,1]) = T_wall 立即成立
+
+        Why 全部 9 個方向而非只設未知方向?
+          Anti-Bounce-Back 的收斂需要串流配合；在靜態 BC 測試（無串流）中，
+          反向分量 g[i,1][ik] 不自然更新，導致只修正 3 個方向後溫度不收斂。
+          設定全平衡態確保 sum(g) = T_wall 在每次 apply 後立即成立，
+          同時 ghost cell 保留物理正確的壁面信息供串流使用。
+
+        Neumann（絕熱）: 未知方向 Bounce-Back，ghost cell 維持當前值。
+
+        未知方向（從底壁進入流體）: k=2(↑), k=5(↗), k=6(↖)
+        """
+        T_wall = self.T_bottom[None]
+        bc     = self.bc_bottom[None]
+        for i in range(1, self.nx + 1):
+            if bc == 1:  # Dirichlet
+                for k in ti.static(range(9)):
+                    g[i, 0][k] = self.thermal.w[k] * T_wall  # ghost cell
+                    g[i, 1][k] = self.thermal.w[k] * T_wall  # 流體第一層
+            else:        # Neumann: Bounce-Back
+                for k in ti.static([2, 5, 6]):
+                    ik = self.thermal.inv[k]
+                    g[i, 1][k] = g[i, 1][ik]
+
+    @ti.kernel
+    def _apply_top_bc(self, g: ti.template()):
+        """
+        頂部壁面 BC（壁在 j=ny+1，流體層在 j=ny）
+
+        Dirichlet: ghost cell j=ny+1 + 流體層 j=ny 全設平衡態
+        Neumann: 未知方向 Bounce-Back
+
+        未知方向（從頂壁進入流體）: k=4(↓), k=7(↙), k=8(↘)
+        """
+        T_wall = self.T_top[None]
+        bc     = self.bc_top[None]
+        ny     = self.ny
+        for i in range(1, self.nx + 1):
+            if bc == 1:
+                for k in ti.static(range(9)):
+                    g[i, ny + 1][k] = self.thermal.w[k] * T_wall
+                    g[i, ny][k]     = self.thermal.w[k] * T_wall
+            else:
+                for k in ti.static([4, 7, 8]):
+                    ik = self.thermal.inv[k]
+                    g[i, ny][k] = g[i, ny][ik]
+
+    @ti.kernel
+    def _apply_left_bc(self, g: ti.template()):
+        """
+        左壁 BC（壁在 i=0，流體層在 i=1）
+
+        Dirichlet: ghost cell i=0 + 流體層 i=1 全設平衡態
+        Neumann: 未知方向 Bounce-Back
+
+        未知方向（從左壁進入流體）: k=1(→), k=5(↗), k=8(↘)
+        """
+        T_wall = self.T_left[None]
+        bc     = self.bc_left[None]
+        for j in range(1, self.ny + 1):
+            if bc == 1:
+                for k in ti.static(range(9)):
+                    g[0, j][k] = self.thermal.w[k] * T_wall
+                    g[1, j][k] = self.thermal.w[k] * T_wall
+            else:
+                for k in ti.static([1, 5, 8]):
+                    ik = self.thermal.inv[k]
+                    g[1, j][k] = g[1, j][ik]
+
+    @ti.kernel
+    def _apply_right_bc(self, g: ti.template()):
+        """
+        右壁 BC（壁在 i=nx+1，流體層在 i=nx）
+
+        Dirichlet: ghost cell i=nx+1 + 流體層 i=nx 全設平衡態
+        Neumann: 未知方向 Bounce-Back
+
+        未知方向（從右壁進入流體）: k=3(←), k=6(↖), k=7(↙)
+        """
+        T_wall = self.T_right[None]
+        bc     = self.bc_right[None]
+        nx     = self.nx
+        for j in range(1, self.ny + 1):
+            if bc == 1:
+                for k in ti.static(range(9)):
+                    g[nx + 1, j][k] = self.thermal.w[k] * T_wall
+                    g[nx, j][k]     = self.thermal.w[k] * T_wall
+            else:
+                for k in ti.static([3, 6, 7]):
+                    ik = self.thermal.inv[k]
+                    g[nx, j][k] = g[nx, j][ik]

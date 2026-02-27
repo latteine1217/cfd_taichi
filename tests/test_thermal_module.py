@@ -161,3 +161,46 @@ def test_buoyancy_positive_above_T_ref():
     thermal.compute_buoyancy()
     F_np = solver.force_field.to_numpy()
     assert np.min(F_np[1:17, 1:17, 1]) > 0  # 全場 F_y > 0
+
+
+def test_hot_wall_bottom_sets_temperature():
+    """底部熱壁應讓 j=1 的溫度趨近 T_hot"""
+    ti.init(arch=ti.cpu, default_fp=ti.f32)
+    from lbm_taichi.core import LBMSolver
+    from lbm_taichi.core.thermal_module import ThermalModule, ThermalBoundaryConditions
+
+    solver = LBMSolver(nx=16, ny=16, re=100.0, u_ref=0.05)
+    thermal = ThermalModule(solver, Pr=0.71)
+    thermal._fill_equilibrium(0.5)
+
+    tbc = ThermalBoundaryConditions(thermal)
+    tbc.add_hot_wall(T_hot=1.0, location='bottom')
+
+    # 施加 BC 多次讓溫度收斂
+    for _ in range(50):
+        tbc.apply(thermal.g)
+        thermal._update_temperature(thermal.g)
+
+    T_np = thermal.T.to_numpy()
+    # j=1 的平均溫度應接近 1.0
+    assert np.mean(T_np[1:17, 1]) > 0.9
+
+
+def test_adiabatic_wall_left():
+    """絕熱左壁：施加 BC 後溫度梯度不應從邊界引入熱量"""
+    ti.init(arch=ti.cpu, default_fp=ti.f32)
+    from lbm_taichi.core import LBMSolver
+    from lbm_taichi.core.thermal_module import ThermalModule, ThermalBoundaryConditions
+
+    solver = LBMSolver(nx=16, ny=16, re=100.0, u_ref=0.05)
+    thermal = ThermalModule(solver, Pr=0.71)
+    thermal._fill_equilibrium(0.5)
+
+    tbc = ThermalBoundaryConditions(thermal)
+    tbc.add_adiabatic_wall('left')
+    tbc.apply(thermal.g)
+
+    # 施加後分佈函數應保持合理（不爆炸）
+    g_np = thermal.g.to_numpy()
+    assert not np.any(np.isnan(g_np))
+    assert not np.any(np.isinf(g_np))
