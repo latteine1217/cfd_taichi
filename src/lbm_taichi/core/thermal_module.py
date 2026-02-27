@@ -210,13 +210,31 @@ class ThermalModule:
         Returns:
             float: Nusselt 數（純導熱=1.0，對流越強則越大）
 
-        Note: 呼叫前必須確保 self.T 已更新至最新時間步
-              （呼叫 self._update_temperature(g_dst)）
+        【重要】Note: 呼叫前必須確保 self.T 已更新至最新時間步
+                     （呼叫 self._update_temperature(g_dst)）
+                     否則計算結果對應前一時間步的溫度。
         """
+        # === 防衛檢查 1: ny 必須 >= 4 避免越界 ===
+        if self.ny < 4:
+            raise ValueError(
+                f"get_nusselt() 需要 ny >= 4 以便計算中間截面梯度。"
+                f"當前 ny={self.ny}。中心差分需讀取 T[i,j_mid±1]；"
+                f"當 ny < 4 時 j_mid 靠近邊界，可能讀到 ghost cell。"
+            )
+
+        # === 防衛檢查 2: 溫度差不能過小（避免除以零）===
+        delta_T = T_bot - T_top
+        if abs(delta_T) < 1e-10:
+            raise ValueError(
+                f"get_nusselt() 偵測到溫度差過小（ΔT={delta_T:.2e}），"
+                f"無法計算有意義的 Nusselt 數。"
+                f"請確保 T_bot ≠ T_top。"
+            )
+
+        # === 計算 Nusselt 數 ===
         self.nu_sum[None] = 0.0
         self._compute_nu_kernel()
         mean_grad = self.nu_sum[None] / self.nx
-        delta_T = T_bot - T_top
         H = self.ny
         return float(-H * mean_grad / delta_T)
 
