@@ -48,6 +48,7 @@ class LBMSolver:
         sponge_strength: float = 0.5,
         collision_model: str = "mrt",
         dynamic_cs_max: float = 0.23,
+        nu_sgs_max: float = 0.0,
     ):
         """
         Args:
@@ -61,6 +62,7 @@ class LBMSolver:
             sponge_strength: 海綿層最大阻尼係數（0-1，推薦 0.5）
             collision_model: "mrt" | "bgk" | "elbm"
             dynamic_cs_max: 動態 Smagorinsky 的上限 (建議 0.2~0.25)
+            nu_sgs_max: SGS 渦黏度上限（<=0 表示不限制）
         """
         self.nx = nx
         self.ny = ny
@@ -70,6 +72,7 @@ class LBMSolver:
         self.u_ref = u_ref
         self.cs = cs
         self.dynamic_cs_max = dynamic_cs_max
+        self.nu_sgs_max_value = nu_sgs_max
         self.enable_sponge = enable_sponge
         self.sponge_strength = sponge_strength
 
@@ -115,6 +118,10 @@ class LBMSolver:
             dtype=ti.f32, shape=(self.nx_g, self.ny_g)
         )  # Smagorinsky 渦黏度
         self.nu_sgs_raw = ti.field(dtype=ti.f32, shape=(self.nx_g, self.ny_g))
+        self.nu_sgs_max = ti.field(dtype=ti.f32, shape=())
+        self.sdf = ti.field(dtype=ti.f32, shape=(self.nx_g, self.ny_g))
+        self.sdf_enabled = ti.field(dtype=ti.i32, shape=())
+        self.sdf_wall_distance = ti.field(dtype=ti.f32, shape=())
         self.u_bar = ti.Vector.field(2, dtype=ti.f32, shape=(self.nx_g, self.ny_g))
         self.uu_bar = ti.Vector.field(3, dtype=ti.f32, shape=(self.nx_g, self.ny_g))
         self.rho_bar = ti.field(dtype=ti.f32, shape=(self.nx_g, self.ny_g))
@@ -126,6 +133,16 @@ class LBMSolver:
         self.wall_function_enabled = ti.field(dtype=ti.i32, shape=())
         self.wall_kappa = ti.field(dtype=ti.f32, shape=())
         self.wall_B = ti.field(dtype=ti.f32, shape=())
+        self.wall_yplus_min = ti.field(dtype=ti.f32, shape=())
+        self.force_enabled = ti.field(dtype=ti.i32, shape=())
+        self.body_force = ti.Vector.field(2, dtype=ti.f32, shape=())
+        self.force_field = ti.Vector.field(2, dtype=ti.f32, shape=(self.nx_g, self.ny_g))
+        self.force_field_enabled = ti.field(dtype=ti.i32, shape=())
+        self.force_field_updater = None
+        self.sdf_enabled[None] = 0
+        self.sdf_wall_distance[None] = 2.0
+        self.sdf.fill(1e3)
+        self.nu_sgs_max[None] = self.nu_sgs_max_value
 
         # === 全局診斷量 ===
         self.total_mass = ti.field(dtype=ti.f32, shape=())
@@ -511,7 +528,7 @@ class LBMSolver:
         """
         self.cfl_violation[None] = 0
         self.max_u[None] = 0.0
-        max_allowed = 0.4  # 保守限制（< c_s = 0.577）
+        max_allowed = 0.3  # 穩定性限制（< c_s = 0.577）
 
         for i, j in ti.ndrange(self.nx, self.ny):
             ig = i + 1
@@ -567,17 +584,36 @@ class LBMSolver:
         self._init_particles()
         self._reset_fields()
         self._build_index_lists(self.mask.to_numpy())
+        self.reset_mass_baseline()
+
+        self.wall_function_enabled[None] = 0
+        self.wall_kappa[None] = 0.41
+        self.wall_B[None] = 5.2
+        self.wall_yplus_min[None] = 5.0
+        self.force_enabled[None] = 0
+        self.body_force[None] = ti.Vector([0.0, 0.0])
+        self.force_field_enabled[None] = 0
+        self.force_field.fill(0.0)
+        self.force_field_updater = None
+
+    def reset_mass_baseline(self):
+        """
+        重新設定質量/能量基準
+
+        When:
+        - 設定障礙物或邊界後（流體體積變化）
+        - 想以當前狀態作為新的守恆基準
+        """
         self._update_macro(self.f)
         self._update_diagnostics()
         self.initial_mass[None] = self.total_mass[None]
         self.initial_KE[None] = self.total_KE[None]
 
-        self.wall_function_enabled[None] = 0
-        self.wall_kappa[None] = 0.41
-        self.wall_B[None] = 5.2
-
     def set_obstacle(
-        self, mask_array: np.ndarray, sdf_array: Optional[np.ndarray] = None
+        self,
+        mask_array: np.ndarray,
+        sdf_array: Optional[np.ndarray] = None,
+        sdf_units: str = "lattice",
     ):
         """
         設定固體障礙物
@@ -585,6 +621,7 @@ class LBMSolver:
         Args:
             mask_array: (nx, ny) 或 (ny, nx) 的 numpy 陣列，1=固體，0=流體
             sdf_array: (nx, ny) 或 (ny, nx) 的 signed distance，流體為正、固體為負
+            sdf_units: 'lattice' (預設，格距單位) 或 'physical'（會除以 grid_spacing）
         """
         if mask_array.shape == (self.nx, self.ny):
             mask_np = mask_array.astype(np.int32)
@@ -600,6 +637,8 @@ class LBMSolver:
         self.mask.from_numpy(mask_g)
 
         if sdf_array is not None:
+            if sdf_units not in {"lattice", "physical"}:
+                raise ValueError(f"Invalid sdf_units: {sdf_units}")
             if sdf_array.shape == (self.nx, self.ny):
                 sdf_np = sdf_array.astype(np.float32)
             elif sdf_array.shape == (self.ny, self.nx):
@@ -608,19 +647,28 @@ class LBMSolver:
                 raise ValueError(
                     f"SDF shape {sdf_array.shape} incompatible with grid ({self.nx}, {self.ny})"
                 )
+            if sdf_units == "physical":
+                sdf_np = sdf_np / max(self.grid_spacing, 1e-12)
 
             boundary_q = self._compute_boundary_q_from_sdf(mask_np, sdf_np)
             q_g = -np.ones((self.nx_g, self.ny_g, 9), dtype=np.float32)
             q_g[1 : self.nx + 1, 1 : self.ny + 1, :] = boundary_q
             self.boundary_q.from_numpy(q_g)
             self.use_bouzidi[None] = 1
+            sdf_g = np.full((self.nx_g, self.ny_g), 1e3, dtype=np.float32)
+            sdf_g[1 : self.nx + 1, 1 : self.ny + 1] = sdf_np
+            self.sdf.from_numpy(sdf_g)
+            self.sdf_enabled[None] = 1
         else:
             self.use_bouzidi[None] = 0
             self._clear_boundary_q()
+            self.sdf_enabled[None] = 0
+            self.sdf.fill(1e3)
 
         self._build_index_lists(mask_g)
 
         # 修正固體區域的速度與分佈函數：由呼叫端決定何時觸發
+        self.reset_mass_baseline()
 
     @ti.kernel
     def _correct_solid_velocity(self):
@@ -942,12 +990,13 @@ class LBMSolver:
         meq = self._compute_meq(current_rho, current_u)
 
         nu_total = self.nu + self.nu_sgs[i, j]
+        if self.nu_sgs_max[None] > 0.0:
+            nu_total = ti.min(nu_total, self.nu + self.nu_sgs_max[None])
         tau_eff = 3.0 * nu_total + 0.5
         s_nu = 1.0 / tau_eff
-        ratio = self.tau / tau_eff
-        s_e = ti.min(1.95, ti.max(0.0, self.S[1] * ratio))
-        s_eps = ti.min(1.95, ti.max(0.0, self.S[2] * ratio))
-        s_q = ti.min(1.95, ti.max(0.0, self.S[4] * ratio))
+        s_e = self.S[1]
+        s_eps = self.S[2]
+        s_q = self.S[4]
 
         m_star = ti.Vector([0.0] * 9)
         for k in ti.static(range(9)):
@@ -963,6 +1012,10 @@ class LBMSolver:
             m_star[k] = m[k] - rate * (m[k] - meq[k])
 
         f_post = self.M_inv[None] @ m_star
+        if self.force_enabled[None] == 1:
+            f_post = self._apply_guo_force(
+                f_post, current_u, self._get_local_force(i, j), 1.0 / tau_eff
+            )
         self._sanitize_post(i, j, f_post, current_rho)
 
     @ti.func
@@ -976,6 +1029,8 @@ class LBMSolver:
             current_u = ti.Vector([0.0, 0.0])
 
         nu_total = self.nu + self.nu_sgs[i, j]
+        if self.nu_sgs_max[None] > 0.0:
+            nu_total = ti.min(nu_total, self.nu + self.nu_sgs_max[None])
         tau_eff = 3.0 * nu_total + 0.5
         omega = 1.0 / tau_eff
 
@@ -989,6 +1044,10 @@ class LBMSolver:
             )
             f_post[k] = f_vec[k] - omega * (f_vec[k] - feq)
 
+        if self.force_enabled[None] == 1:
+            f_post = self._apply_guo_force(
+                f_post, current_u, self._get_local_force(i, j), omega
+            )
         self._sanitize_post(i, j, f_post, current_rho)
 
     @ti.func
@@ -1013,12 +1072,13 @@ class LBMSolver:
         meq = self._compute_meq(current_rho, current_u)
 
         nu_total = self.nu + self.nu_sgs[i, j]
+        if self.nu_sgs_max[None] > 0.0:
+            nu_total = ti.min(nu_total, self.nu + self.nu_sgs_max[None])
         tau_eff = 3.0 * nu_total + 0.5
         s_nu = 1.0 / tau_eff
-        ratio = self.tau / tau_eff
-        s_e = ti.min(1.95, ti.max(0.0, self.S[1] * ratio))
-        s_eps = ti.min(1.95, ti.max(0.0, self.S[2] * ratio))
-        s_q = ti.min(1.95, ti.max(0.0, self.S[4] * ratio))
+        s_e = self.S[1]
+        s_eps = self.S[2]
+        s_q = self.S[4]
 
         m_star = ti.Vector([0.0] * 9)
         for k in ti.static(range(9)):
@@ -1059,6 +1119,10 @@ class LBMSolver:
 
         alpha = ti.max(0.2, ti.min(1.9, alpha))
         f_post = f_vec + alpha * delta
+        if self.force_enabled[None] == 1:
+            f_post = self._apply_guo_force(
+                f_post, current_u, self._get_local_force(i, j), 1.0 / tau_eff
+            )
         self._sanitize_post(i, j, f_post, current_rho)
 
     @ti.func
@@ -1072,6 +1136,8 @@ class LBMSolver:
             current_u = ti.Vector([0.0, 0.0])
 
         nu_total = self.nu + self.nu_sgs[i, j]
+        if self.nu_sgs_max[None] > 0.0:
+            nu_total = ti.min(nu_total, self.nu + self.nu_sgs_max[None])
         tau_eff = 3.0 * nu_total + 0.5
         beta = 1.0 / (2.0 * tau_eff)
 
@@ -1108,6 +1174,10 @@ class LBMSolver:
             alpha = high
 
         f_post = f_vec - alpha * beta * g
+        if self.force_enabled[None] == 1:
+            f_post = self._apply_guo_force(
+                f_post, current_u, self._get_local_force(i, j), 1.0 / tau_eff
+            )
         self._sanitize_post(i, j, f_post, current_rho)
 
     @ti.func
@@ -1224,11 +1294,99 @@ class LBMSolver:
 
                 if current_rho > 0:
                     current_u /= current_rho
+                    if self.force_enabled[None] == 1:
+                        current_u += (
+                            0.5
+                            * self._get_local_force(ig, jg)
+                            / ti.max(current_rho, 1e-12)
+                        )
 
                 self.rho[ig, jg] = current_rho
                 self.u[ig, jg] = current_u
             else:  # 固體節點：速度為零
                 self.u[ig, jg] = ti.Vector([0.0, 0.0])
+
+    @ti.func
+    def _apply_guo_force(self, f_post: ti.template(), u, force, omega: ti.f32):
+        cs2 = 1.0 / 3.0
+        for k in ti.static(range(9)):
+            e_k = ti.cast(self.e[k], ti.f32)
+            eu = e_k.dot(u)
+            term = (e_k - u) / cs2 + (eu / (cs2 * cs2)) * e_k
+            f_post[k] += (1.0 - 0.5 * omega) * self.w[k] * term.dot(force)
+        return f_post
+
+    @ti.func
+    def _get_local_force(self, i: ti.i32, j: ti.i32):
+        force = self.body_force[None]
+        if self.force_field_enabled[None] == 1:
+            force += self.force_field[i, j]
+        return force
+
+    def set_body_force(self, fx: float, fy: float):
+        """
+        設定體積力（等效壓力梯度）
+
+        Args:
+            fx: x 方向加速度
+            fy: y 方向加速度
+        """
+        self.body_force[None] = ti.Vector([fx, fy])
+        self._refresh_force_enabled()
+
+    def set_body_force_field(self, force_field: np.ndarray, includes_ghost: bool = False):
+        """
+        設定空間變化的體積力場
+
+        What: 指定每個格點的力（force density）
+        Why: 用於浮力、旋轉、空間變化外力等
+        When: 需要非均勻外力場時
+
+        Args:
+            force_field: (nx, ny, 2) 或 (nx+2, ny+2, 2) 陣列
+            includes_ghost: True 表示 force_field 已含 ghost cells
+        """
+        if includes_ghost:
+            if force_field.shape != (self.nx_g, self.ny_g, 2):
+                raise ValueError(
+                    f"force_field shape {force_field.shape} incompatible with grid ({self.nx_g}, {self.ny_g}, 2)"
+                )
+            self.force_field.from_numpy(force_field.astype(np.float32))
+        else:
+            if force_field.shape != (self.nx, self.ny, 2):
+                raise ValueError(
+                    f"force_field shape {force_field.shape} incompatible with grid ({self.nx}, {self.ny}, 2)"
+                )
+            force_g = np.zeros((self.nx_g, self.ny_g, 2), dtype=np.float32)
+            force_g[1 : self.nx + 1, 1 : self.ny + 1, :] = force_field
+            self.force_field.from_numpy(force_g)
+        self.force_field_enabled[None] = 1
+        self._refresh_force_enabled()
+
+    def clear_body_force_field(self):
+        """清除空間變化外力場"""
+        self.force_field.fill(0.0)
+        self.force_field_enabled[None] = 0
+        self._refresh_force_enabled()
+
+    def set_force_field_updater(self, updater: Optional[Callable[[], None]]):
+        """
+        設定每步更新外力場的回呼函式
+
+        What: 在 step() 的宏觀量更新後呼叫 updater
+        Why: 支援隨時間變化的外力（如 Boussinesq 浮力）
+        When: 外力需要依賴 rho/u 等當前狀態
+        """
+        self.force_field_updater = updater
+        self.force_field_enabled[None] = 1 if updater is not None else 0
+        self._refresh_force_enabled()
+
+    def _refresh_force_enabled(self):
+        has_uniform = (abs(self.body_force[None][0]) > 0.0) or (
+            abs(self.body_force[None][1]) > 0.0
+        )
+        has_field = self.force_field_enabled[None] == 1
+        self.force_enabled[None] = 1 if (has_uniform or has_field) else 0
 
     def _update_smagorinsky_viscosity(self):
         """
@@ -1450,6 +1608,10 @@ class LBMSolver:
                         self.nu_sgs[ig, jg] = cs2 * delta * delta * s_mag_c
                     else:
                         self.nu_sgs[ig, jg] = sum_nu * (1.0 / 9.0)
+                    if self.nu_sgs_max[None] > 0.0:
+                        self.nu_sgs[ig, jg] = ti.min(
+                            self.nu_sgs[ig, jg], self.nu_sgs_max[None]
+                        )
             else:
                 self.nu_sgs[ig, jg] = 0.0
 
@@ -1470,16 +1632,38 @@ class LBMSolver:
             jg = j + 1
             if self.mask[ig, jg] == 0:
                 n = ti.Vector([0.0, 0.0])
-                if i + 1 < self.nx and self.mask[ig + 1, jg] == 1:
-                    n = ti.Vector([1.0, 0.0])
-                elif i - 1 >= 0 and self.mask[ig - 1, jg] == 1:
-                    n = ti.Vector([-1.0, 0.0])
-                elif j + 1 < self.ny and self.mask[ig, jg + 1] == 1:
-                    n = ti.Vector([0.0, 1.0])
-                elif j - 1 >= 0 and self.mask[ig, jg - 1] == 1:
-                    n = ti.Vector([0.0, -1.0])
+                y = 0.5 * self.grid_spacing
+                has_wall = 0.0
 
-                has_wall = ti.cast(n.norm_sqr() > 0.0, ti.f32)
+                if self.sdf_enabled[None] == 1:
+                    phi = self.sdf[ig, jg]
+                    near = ti.cast(
+                        (phi > 0.0) & (phi < self.sdf_wall_distance[None]), ti.f32
+                    )
+                    if near > 0.0:
+                        i_minus = ti.max(ig - 1, 1)
+                        i_plus = ti.min(ig + 1, self.nx)
+                        j_minus = ti.max(jg - 1, 1)
+                        j_plus = ti.min(jg + 1, self.ny)
+                        dphidx = (self.sdf[i_plus, jg] - self.sdf[i_minus, jg]) * 0.5
+                        dphidy = (self.sdf[ig, j_plus] - self.sdf[ig, j_minus]) * 0.5
+                        grad_norm = ti.sqrt(dphidx * dphidx + dphidy * dphidy)
+                        if grad_norm > 1e-6:
+                            n = ti.Vector([dphidx, dphidy]) / grad_norm
+                        y = ti.max(phi, 0.5)
+                        has_wall = 1.0
+
+                if has_wall == 0.0:
+                    if i + 1 < self.nx and self.mask[ig + 1, jg] == 1:
+                        n = ti.Vector([1.0, 0.0])
+                    elif i - 1 >= 0 and self.mask[ig - 1, jg] == 1:
+                        n = ti.Vector([-1.0, 0.0])
+                    elif j + 1 < self.ny and self.mask[ig, jg + 1] == 1:
+                        n = ti.Vector([0.0, 1.0])
+                    elif j - 1 >= 0 and self.mask[ig, jg - 1] == 1:
+                        n = ti.Vector([0.0, -1.0])
+
+                    has_wall = ti.cast(n.norm_sqr() > 0.0, ti.f32)
                 u = self.u[ig, jg]
                 u_n = u.dot(n)
                 u_t = u - u_n * n
@@ -1487,24 +1671,43 @@ class LBMSolver:
                 active = has_wall * ti.cast(u_t_mag > 1e-6, ti.f32)
 
                 if active > 0.0:
-                    y = 0.5 * self.grid_spacing
                     nu = self.nu + self.nu_sgs[ig, jg]
                     u_tau = ti.sqrt(ti.abs(u_t_mag * nu / ti.max(y, 1e-6)))
+                    y_plus = y * u_tau / ti.max(nu, 1e-12)
+                    if y_plus < self.wall_yplus_min[None]:
+                        continue
 
                     for _ in ti.static(range(2)):
-                        y_plus = y * u_tau / ti.max(nu, 1e-12)
                         y_plus = ti.max(y_plus, 1.0)
-                        u_plus = (1.0 / self.wall_kappa[None]) * ti.log(
-                            y_plus
-                        ) + self.wall_B[None]
+                        # Reichardt wall law + viscous sublayer (y+ < 5)
+                        u_plus = 0.0
+                        if y_plus < 5.0:
+                            u_plus = y_plus
+                        else:
+                            kappa = self.wall_kappa[None]
+                            A = 11.0
+                            B = 3.0
+                            C = 7.8
+                            u_plus = (1.0 / kappa) * ti.log(1.0 + kappa * y_plus)
+                            u_plus += C * (
+                                1.0
+                                - ti.exp(-y_plus / A)
+                                - (y_plus / B) * ti.exp(-y_plus / B)
+                            )
                         u_tau = u_t_mag / ti.max(u_plus, 1e-6)
 
                     nu_t = u_tau * u_tau * y / u_t_mag - nu
                     nu_t = ti.max(nu_t, 0.0)
+                    if self.nu_sgs_max[None] > 0.0:
+                        nu_t = ti.min(nu_t, self.nu_sgs_max[None])
                     self.nu_sgs[ig, jg] = ti.max(self.nu_sgs[ig, jg], nu_t)
 
     def set_wall_function(
-        self, enabled: bool = True, kappa: float = 0.41, B: float = 5.2
+        self,
+        enabled: bool = True,
+        kappa: float = 0.41,
+        B: float = 5.2,
+        yplus_min: float = 5.0,
     ):
         """
         啟用或設定 Wall Function
@@ -1513,10 +1716,12 @@ class LBMSolver:
             enabled: 是否啟用
             kappa: von Karman 常數
             B: log-law 常數
+            yplus_min: y+ 過小時直接關閉 wall-function
         """
         self.wall_function_enabled[None] = 1 if enabled else 0
         self.wall_kappa[None] = kappa
         self.wall_B[None] = B
+        self.wall_yplus_min[None] = yplus_min
 
     @ti.kernel
     def _update_diagnostics(self):
@@ -1731,6 +1936,8 @@ class LBMSolver:
             f_dst: 目標分佈函數場
         """
         self._update_macro(f_src)
+        if self.force_field_updater is not None:
+            self.force_field_updater()
         self._update_smagorinsky_viscosity()
         if self.wall_function_enabled[None] == 1:
             self._apply_wall_function()
@@ -1796,7 +2003,7 @@ class LBMSolver:
 
         if has_violation:
             max_u = self.max_u[None]
-            msg = f"⚠️  CFL violation detected: max|u| = {max_u:.4f} > 0.4"
+            msg = f"⚠️  CFL violation detected: max|u| = {max_u:.4f} > 0.3"
 
             if warn_only:
                 print(msg)

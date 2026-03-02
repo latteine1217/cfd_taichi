@@ -192,16 +192,19 @@ class ThermalModule:
 
     def get_nusselt(self, T_bot: float, T_top: float) -> float:
         """
-        計算 Nusselt 數（使用中間截面的溫度梯度）
+        計算 Nusselt 數（使用壁面溫度梯度）
 
-        What: Nu = -H * mean(∂T/∂y|_{y=H/2}) / ΔT
-        Why 用中間截面?
-            - 避開壁面 BC 數值影響（壁面附近的梯度計算誤差較大）
-            - 穩態下各橫截面的熱通量守恆，中間截面最具代表性
-        Why 中心差分?
-            - 二階精度，不引入人工偏移
+        What: Nu = -H * mean(∂T/∂y|_{wall}) / ΔT
+        Why 改用壁面而非中間截面?
+            在對流流場中，中間截面因流體混合而梯度降低（甚至 < pure conduction），
+            只計算擴散貢獻會低估 Nu（典型錯誤：Nu < 1）。
+            壁面處 u_y = 0（no-slip），熱通量完全由傳導決定：
+            Q_wall = -κ ∂T/∂y|_{wall}，不含對流項，Nu 計算正確。
+        Why 平均底/頂兩壁?
+            減少 ABB 數值誤差，提升精度。
 
-        純導熱穩態: ∂T/∂y = -ΔT/H → Nu = 1
+        公式: Nu = -H * mean[(∂T/∂y|_{j=1} + ∂T/∂y|_{j=ny}) / 2] / ΔT
+        純導熱穩態: ∂T/∂y = -ΔT/H → Nu ≈ 1
 
         Args:
             T_bot: 底壁溫度
@@ -217,9 +220,9 @@ class ThermalModule:
         # === 防衛檢查 1: ny 必須 >= 4 避免越界 ===
         if self.ny < 4:
             raise ValueError(
-                f"get_nusselt() 需要 ny >= 4 以便計算中間截面梯度。"
-                f"當前 ny={self.ny}。中心差分需讀取 T[i,j_mid±1]；"
-                f"當 ny < 4 時 j_mid 靠近邊界，可能讀到 ghost cell。"
+                f"get_nusselt() 需要 ny >= 4 以便計算壁面梯度。"
+                f"當前 ny={self.ny}。壁面差分需讀取 T[i,2] 和 T[i,ny-1]；"
+                f"當 ny < 4 時相鄰格點可能越界或讀到 ghost cell。"
             )
 
         # === 防衛檢查 2: 溫度差不能過小（避免除以零）===
@@ -241,14 +244,21 @@ class ThermalModule:
     @ti.kernel
     def _compute_nu_kernel(self):
         """
-        計算中間截面（j=ny//2）的平均溫度梯度
+        計算底/頂壁面溫度梯度的平均值
 
-        使用中心差分：∂T/∂y|_{j} ≈ (T[i,j+1] - T[i,j-1]) / 2
-        結果累加至 self.nu_sum（再除以 nx 即為平均值）
+        Why 壁面梯度而非中間截面?
+            對流流場中，中間截面梯度因混合降低（Nu_midplane < 1），
+            僅反映擴散貢獻。壁面 u_y=0，Nu 由純傳導決定，正確捕捉
+            對流對熱傳的增強效應。
+
+        底壁 (j=1): ∂T/∂y ≈ T[i,2] - T[i,1]  (forward diff, dx=1)
+        頂壁 (j=ny): ∂T/∂y ≈ T[i,ny] - T[i,ny-1]  (backward diff, dx=1)
+        結果：(∂T/∂y_bot + ∂T/∂y_top) / 2，累加至 nu_sum
         """
-        j_mid = self.ny // 2
         for i in range(1, self.nx + 1):
-            dT_dy = (self.T[i, j_mid + 1] - self.T[i, j_mid - 1]) / 2.0
+            dT_dy_bot = self.T[i, 2] - self.T[i, 1]
+            dT_dy_top = self.T[i, self.ny] - self.T[i, self.ny - 1]
+            dT_dy = (dT_dy_bot + dT_dy_top) * 0.5
             ti.atomic_add(self.nu_sum[None], dT_dy)
 
     def register_with_solver(self):
@@ -377,6 +387,36 @@ class ThermalBoundaryConditions:
             self._apply_left_bc(g)
         if self.bc_right[None] > 0:
             self._apply_right_bc(g)
+
+    def apply_periodic_x(self, g):
+        """
+        X 方向溫度場週期邊界條件（方向選擇性補缺）
+
+        What: 補充左右邊界 g push 串流後缺失的方向分量
+        Why:  熱場 push 串流後，左邊界 ig=1 缺少向東分量（k=1,5,8），
+              右邊界 ig=nx 缺少向西分量（k=3,6,7）。
+              兩組 k 不相交，故可直接填入不需保存舊值。
+        """
+        self._periodic_x_kernel(g)
+
+    @ti.kernel
+    def _periodic_x_kernel(self, g: ti.template()):
+        """
+        補填 g 的方向選擇性週期分量
+
+        左邊界 ig=1：向東缺失 k=1,5,8 ← 來自右側 ig=nx
+        右邊界 ig=nx：向西缺失 k=3,6,7 ← 來自左側 ig=1
+        """
+        for j in range(self.ny):
+            jg = j + 1
+            # 左邊界：補東向分量
+            g[1, jg][1] = g[self.nx, jg][1]
+            g[1, jg][5] = g[self.nx, jg][5]
+            g[1, jg][8] = g[self.nx, jg][8]
+            # 右邊界：補西向分量
+            g[self.nx, jg][3] = g[1, jg][3]
+            g[self.nx, jg][6] = g[1, jg][6]
+            g[self.nx, jg][7] = g[1, jg][7]
 
     @ti.kernel
     def _apply_bottom_bc(self, g: ti.template()):
