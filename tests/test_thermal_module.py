@@ -10,10 +10,6 @@ ThermalModule 單元測試
 
 import taichi as ti
 import numpy as np
-import sys
-import os
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
 def test_thermal_module_init():

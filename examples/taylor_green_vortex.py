@@ -24,16 +24,12 @@ Physical Setup:
 """
 
 import os
-import sys
 import taichi as ti
 import numpy as np
 import argparse
 import time
 
-sys.path.insert(
-    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
-)
-
+from cfd_taichi import build_history_payload
 from lbm_taichi.core import LBMSolver, BoundaryConditions, Diagnostics
 
 
@@ -41,6 +37,7 @@ def run_taylor_green(
     res: int = 128,
     re: float = 100.0,
     u0: float = 0.1,
+    cs: float = 0.16,
     steps: int = 10000,
     interval: int = 100,
     output_dir: str = "output_taylor_green",
@@ -53,6 +50,7 @@ def run_taylor_green(
         res: 解析度（nx = ny = res）
         re: Reynolds 數
         u0: 初始最大速度
+        cs: LES 啟用旗標 (<=0 表示關閉；auto 依 Re 判斷)
         steps: 總步數
         interval: 保存間隔
         output_dir: 輸出目錄
@@ -64,7 +62,21 @@ def run_taylor_green(
     print(f"  Max Velocity  : {u0}")
 
     # === 創建 Solver ===
-    solver = LBMSolver(nx=nx, ny=ny, re=re, u_ref=u0, collision_model=collision_model)
+    auto_les = re > 2000.0
+    cs_eff = cs if cs > 0.0 else (0.16 if auto_les else cs)
+    solver = LBMSolver(
+        nx=nx, ny=ny, re=re, u_ref=u0, collision_model=collision_model, cs=cs_eff
+    )
+    if re > 1000.0:
+        solver.set_wall_function(enabled=True, yplus_min=5.0)
+        print("Wall Function: Enabled (Re > 1000, yplus_min=5.0)")
+    else:
+        solver.set_wall_function(enabled=False)
+        print("Wall Function: Disabled (Re <= 1000)")
+    if cs_eff > 0.0:
+        print("LES Model: Dynamic Smagorinsky (auto Cs)")
+    else:
+        print("LES Model: Disabled")
 
     # === 週期邊界條件 ===
     bc = BoundaryConditions(solver)
@@ -78,19 +90,15 @@ def run_taylor_green(
     print(f"\nInitializing Taylor-Green Vortex...")
     k = 2.0 * np.pi / nx  # 波數
 
+    u_field = np.zeros((nx, ny, 2), dtype=np.float32)
     for i in range(nx):
         for j in range(ny):
             x = i
             y = j
-            u_x = -u0 * np.cos(k * x) * np.sin(k * y)
-            u_y = u0 * np.sin(k * x) * np.cos(k * y)
-            solver.u[i + 1, j + 1] = [u_x, u_y]
-            solver.rho[i + 1, j + 1] = 1.0
+            u_field[i, j, 0] = -u0 * np.cos(k * x) * np.sin(k * y)
+            u_field[i, j, 1] = u0 * np.sin(k * x) * np.cos(k * y)
 
-    # 從速度場重建分佈函數
-    solver._init_from_macro()
-    solver.apply_boundary_conditions(solver.f)
-    solver.apply_boundary_conditions(solver.f_new)
+    solver.set_initial_condition(velocity=u_field, apply_boundaries=True)
 
     # === 理論衰減率 ===
     nu = solver.nu
@@ -104,9 +112,7 @@ def run_taylor_green(
     diag = Diagnostics(solver, output_dir=output_dir)
 
     # === 初始動能 ===
-    solver._update_macro(solver.f)
-    solver._update_diagnostics()
-    solver.initial_KE[None] = solver.total_KE[None]
+    solver.prepare_diagnostics(reset_baseline=True)
     initial_KE = solver.total_KE[None]
     print(f"Initial Kinetic Energy: {initial_KE:.6f}")
 
@@ -130,8 +136,7 @@ def run_taylor_green(
         solver.step(f_src, f_dst)
 
         if step % 100 == 0:
-            solver._update_macro(f_dst)
-            solver._update_diagnostics()
+            solver.prepare_diagnostics(f_dst)
             ti.sync()
 
             current_KE = solver.total_KE[None]
@@ -214,25 +219,27 @@ def run_taylor_green(
 
     # 保存歷史數據
     history_file = os.path.join(output_dir, "history.npy")
-    np.save(
-        history_file,
-        {
+    history_payload = build_history_payload(
+        solver=solver,
+        steps=time_history,
+        params={
+            "res": res,
+            "re": re,
+            "u0": u0,
+            "nx": nx,
+            "ny": ny,
+            "nu": nu,
+            "k": k,
+        },
+        extra_series={
+            "time": time_history,
             "KE_history": KE_history,
-            "time_history": time_history,
-            "decay_rate_theory": decay_rate_theory,
-            "decay_rate_measured": decay_rate_overall,
-            "error": error_overall,
-            "params": {
-                "res": res,
-                "re": re,
-                "u0": u0,
-                "nx": nx,
-                "ny": ny,
-                "nu": nu,
-                "k": k,
-            },
+            "decay_rate_theory": [decay_rate_theory] * len(time_history),
+            "decay_rate_measured": [decay_rate_overall] * len(time_history),
+            "error": [error_overall] * len(time_history),
         },
     )
+    np.save(history_file, history_payload, allow_pickle=True)
     print(f"\n📊 History saved to {history_file}")
 
     # === 物理解釋 ===
@@ -248,6 +255,12 @@ def main():
     parser.add_argument("--res", type=int, default=128, help="Resolution (nx=ny=res)")
     parser.add_argument("--re", type=float, default=100.0, help="Reynolds number")
     parser.add_argument("--u0", type=float, default=0.1, help="Initial max velocity")
+    parser.add_argument(
+        "--cs",
+        type=float,
+        default=0.16,
+        help="LES enable flag (<=0 disables dynamic Smagorinsky)",
+    )
     parser.add_argument("--steps", type=int, default=10000, help="Total steps")
     parser.add_argument("--interval", type=int, default=100, help="Save interval")
     parser.add_argument(
@@ -269,6 +282,7 @@ def main():
         res=args.res,
         re=args.re,
         u0=args.u0,
+        cs=args.cs,
         steps=args.steps,
         interval=args.interval,
         output_dir=args.output,

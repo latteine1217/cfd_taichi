@@ -25,15 +25,10 @@ Why:  驗證 DDF+Boussinesq LBM 的 Nu-Ra 關係（封閉腔體設定）
 """
 
 import os
-import sys
 import taichi as ti
 import numpy as np
 import argparse
 import time
-
-sys.path.insert(
-    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
-)
 
 from lbm_taichi.core import LBMSolver, BoundaryConditions
 from lbm_taichi.core.thermal_module import ThermalModule, ThermalBoundaryConditions
@@ -204,10 +199,8 @@ def run_rayleigh_benard(
     tbc.apply(thermal.g_new)
 
     # 記錄初始質量基準
-    solver._update_macro(solver.f)
-    solver._update_diagnostics()
+    solver.prepare_diagnostics(reset_baseline=True)
     ti.sync()
-    solver.initial_mass[None] = solver.total_mass[None]
 
     # === 主迴圈 ===
     print(f"\n{'step':>8} | {'mom_res':>10} | {'mass_err':>10} | "
@@ -235,8 +228,7 @@ def run_rayleigh_benard(
         tbc.apply(g_dst)
 
         if step % 200 == 0:
-            solver._update_macro(f_dst)
-            solver._update_diagnostics()
+            solver.prepare_diagnostics(f_dst)
             thermal._update_temperature(g_dst)
             ti.sync()
 
@@ -275,7 +267,7 @@ def run_rayleigh_benard(
     print(f"\n--- Completed {steps} steps in {total_time:.1f}s ---")
 
     # 最終診斷
-    solver._update_macro(f_dst)
+    solver.prepare_diagnostics(f_dst)
     thermal._update_temperature(g_dst)
     ti.sync()
     final_nu = thermal.get_nusselt(T_bot=1.0, T_top=0.0)

@@ -7,11 +7,13 @@
 
 ---
 
+> **注意**：Neumann outflow 已從案例/CLI 移除，一般外流請使用 **Orlanski**。
+
 ## 📊 改進總覽
 
 | Priority | 改進項目 | 狀態 | 影響 | 計算成本 |
 |---------|---------|------|------|---------|
-| **🔴 P1** | Neumann BC 質量修正 | ✅ | 質量守恆 50-100× | +0.5% |
+| **🔴 P1** | Neumann 質量修正（deprecated） | ✅ | 質量守恆 50-100× | +0.5% |
 | **🔴 P1** | 角點外推處理 | ✅ | 流場精度 5× | +0.1% |
 | **🔴 P1** | Sponge Layer | ✅ | Re>5000 穩定 | +2-3% |
 | **🔴 P1** | 全局質量修正 | ✅ | 長期守恆 | +0.5% |
@@ -24,13 +26,13 @@
 
 ## 🎯 Priority 1: Critical Issues（已完成）
 
-### 1.1 Neumann Outflow 質量修正
+### 1.1 Neumann Outflow 質量修正（deprecated）
 
 **問題**：純零梯度外推不保證質量守恆，長時間模擬累積誤差 ±0.5-1%
 
-**解決方案**：
+**解決方案**（deprecated，僅供內部測試）：
 ```python
-bc.add_neumann_outflow(location='right', mass_corrected=True)  # 默認啟用
+bc.add_neumann_outflow(location='right')
 ```
 
 **實現**：
@@ -185,7 +187,7 @@ bc.add_zou_he_pressure_outlet(
 ```
 src/lbm_taichi/core/
 ├── boundary_conditions.py      [修改] +400 行
-│   ├── Neumann BC 質量修正版
+│   ├── Neumann BC 質量修正版（deprecated）
 │   ├── 角點外推處理
 │   ├── 週期邊界條件
 │   └── Zou-He 反射波抑制版
@@ -269,7 +271,7 @@ python examples/taylor_green_vortex.py --res 128 --re 100 --steps 10000
 ### **我應該使用哪些改進？**
 
 #### **所有案例都應使用**
-- ✅ Neumann BC 質量修正（`mass_corrected=True`，默認）
+- ✅ Orlanski 非反射出口（`add_orlanski_outflow()`）
 - ✅ 角點外推（小計算域 < 128×128）
 
 #### **高 Re 數（> 5000）**
@@ -288,13 +290,10 @@ python examples/taylor_green_vortex.py --res 128 --re 100 --steps 10000
 
 #### **從舊版升級（3 步驟）**
 
-**Step 1: 更新 Neumann BC**
+**Step 1: Neumann BC（deprecated）**
 ```python
-# 舊版
+# 僅供內部測試
 bc.add_neumann_outflow('right')
-
-# 新版（自動質量修正）
-bc.add_neumann_outflow('right', mass_corrected=True)
 ```
 
 **Step 2: 更新角點處理（小計算域）**

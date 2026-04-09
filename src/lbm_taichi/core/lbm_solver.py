@@ -36,6 +36,10 @@ class LBMSolver:
     - 足夠捕捉 Navier-Stokes 物理
     """
 
+    solver_family = "lbm"
+    equation_set = "navier_stokes"
+    regime = "low_mach"
+
     def __init__(
         self,
         nx: int,
@@ -580,7 +584,13 @@ class LBMSolver:
         self.use_bouzidi[None] = 0
 
     def reset(self):
-        """公開介面：重置求解器"""
+        """
+        完整重置求解器（含 mask/幾何）。
+        僅在 __init__ 或需要完全重建時呼叫。
+
+        ⚠️  此方法會清除 mask（障礙物與 No-Slip 壁面）。
+            若只需要重新開始流場而保留幾何設定，請改用 reset_flow_state()。
+        """
         self._init_particles()
         self._reset_fields()
         self._build_index_lists(self.mask.to_numpy())
@@ -595,6 +605,158 @@ class LBMSolver:
         self.force_field_enabled[None] = 0
         self.force_field.fill(0.0)
         self.force_field_updater = None
+
+    @ti.kernel
+    def _reset_state_preserve_mask(self):
+        """
+        重置流場狀態，保留 mask/幾何設定。
+        What: 將 f/u/rho 重設為平衡分佈；mask 維持不變。
+        Why: 允許在保留障礙物、壁面設定的前提下重新開始模擬。
+        """
+        for i, j in ti.ndrange(self.nx_g, self.ny_g):
+            inside = i >= 1 and i <= self.nx and j >= 1 and j <= self.ny
+            if inside and self.mask[i, j] == 0:
+                self.u[i, j] = ti.Vector([self.u_ref, 0.0])
+                self.prev_u[i, j] = ti.Vector([self.u_ref, 0.0])
+            else:
+                self.u[i, j] = ti.Vector([0.0, 0.0])
+                self.prev_u[i, j] = ti.Vector([0.0, 0.0])
+
+            self.rho[i, j] = 1.0
+            self.prev_rho[i, j] = 1.0
+
+            u_vec = self.u[i, j]
+            rho_val = self.rho[i, j]
+            u_sq = u_vec.norm_sqr()
+
+            for k in ti.static(range(9)):
+                eu = self.e[k].dot(u_vec)
+                f_eq = (
+                    self.w[k] * rho_val * (1.0 + 3.0 * eu + 4.5 * eu * eu - 1.5 * u_sq)
+                )
+                self.f[i, j][k] = f_eq
+                self.f_new[i, j][k] = f_eq
+                self.f_post[i, j][k] = f_eq
+
+    def reset_flow_state(self):
+        """
+        重置流場狀態，保留 mask/幾何/BC 配置。
+
+        What: 重置 f/u/rho 到平衡狀態，不改變 mask、邊界條件或障礙物設定。
+        Why: 允許在保留同一幾何的前提下重啟模擬（例如掃描 Re 數）。
+
+        與 reset() 的差異：
+        - reset_flow_state() → 保留 mask（障礙物、No-Slip 壁面）
+        - reset()            → 完全重置，包含 mask（等同重新建立 solver）
+        """
+        self._init_particles()
+        self._reset_state_preserve_mask()
+        self.reset_mass_baseline()
+
+    def set_initial_condition(
+        self,
+        velocity: Optional[np.ndarray] = None,
+        density: Optional[np.ndarray] = None,
+        apply_boundaries: bool = False,
+        reset_baseline: bool = False,
+    ):
+        """
+        設定初始宏觀場並重建平衡分佈。
+
+        What:
+        - 以公開 API 一次設定速度場與密度場
+        - 自動重建 `f / f_new / f_post`，避免案例直接碰私有 kernel
+
+        Why:
+        - 讓 examples/tests 不必直接呼叫 `_apply_velocity_field()` 或寫入 `rho`
+        - 保持初始化流程一致，可重用於均勻場、靜止場、KH/RT 等非均勻場
+
+        When:
+        - 案例初始條件建立
+        - 重新啟動同一幾何下的流場
+        """
+        if velocity is None and density is None:
+            raise ValueError("At least one of velocity or density must be provided.")
+
+        if density is not None:
+            if density.shape != (self.nx, self.ny):
+                raise ValueError(
+                    f"Density shape {density.shape} incompatible with grid ({self.nx}, {self.ny})"
+                )
+            self._apply_density_field(np.asarray(density, dtype=np.float32))
+
+        if velocity is not None:
+            if velocity.shape != (self.nx, self.ny, 2):
+                raise ValueError(
+                    "Velocity shape "
+                    f"{velocity.shape} incompatible with grid ({self.nx}, {self.ny}, 2)"
+                )
+            self._apply_velocity_field(np.asarray(velocity, dtype=np.float32))
+        else:
+            self._refresh_equilibrium_from_macro()
+
+        if apply_boundaries:
+            self.apply_boundary_conditions(self.f)
+            self.apply_boundary_conditions(self.f_new)
+
+        if reset_baseline:
+            self.reset_mass_baseline()
+
+    def initialize_obstacle(
+        self,
+        mask_array: np.ndarray,
+        sdf_array: Optional[np.ndarray] = None,
+        sdf_units: str = "lattice",
+        reset_baseline: bool = True,
+    ):
+        """
+        設定障礙物並同步修正固體區狀態。
+
+        What:
+        - 包裝 `set_obstacle()` 與固體區速度/分佈修正
+
+        Why:
+        - 避免案例直接呼叫 `_correct_solid_velocity()`
+        - 讓障礙物初始化成為 solver 的正式公開流程
+        """
+        self.set_obstacle(mask_array, sdf_array=sdf_array, sdf_units=sdf_units)
+        self._correct_solid_velocity()
+        if reset_baseline:
+            self.reset_mass_baseline()
+
+    def prepare_diagnostics(self, f_src=None, reset_baseline: bool = False):
+        """
+        更新宏觀量與診斷量，必要時重設守恆基準。
+
+        What:
+        - 取代案例直接呼叫 `_update_macro()` / `_update_diagnostics()`
+
+        Why:
+        - 收斂判定、輸出、基準重設應由公開 API 管理
+        - 降低案例與 solver internals 的耦合
+        """
+        if f_src is None:
+            f_src = self.f
+
+        self._update_macro(f_src)
+        self._update_diagnostics()
+        if reset_baseline:
+            self.initial_mass[None] = self.total_mass[None]
+            self.initial_KE[None] = self.total_KE[None]
+        return self.get_diagnostics()
+
+    def rebuild_index_lists(self):
+        """
+        重建流體/固體/邊界索引列表。
+
+        What: 從目前的 mask 重新計算 bulk/boundary/solid 分類。
+        Why: mask 被 add_no_slip_wall() 或 set_obstacle() 修改後，
+             舊的索引列表已失效；此方法確保 step() 使用正確的節點分類。
+
+        Note: BoundaryConditions.add_no_slip_wall() 會自動呼叫此方法；
+              一般情況下無需從 example 手動呼叫。
+        """
+        self._build_index_lists(self.mask.to_numpy())
 
     def reset_mass_baseline(self):
         """
@@ -756,7 +918,11 @@ class LBMSolver:
                     solid.append([ig, jg])
                     continue
 
+                # 域邊界上的流體節點應視為 boundary，而不是直接跳過。
+                # 否則像 LDC top moving wall 這種位於域邊界的流體列不會參與正常的
+                # collide/stream 邊界更新，動量也無法向內傳遞。
                 if i == 0 or j == 0 or i == self.nx - 1 or j == self.ny - 1:
+                    boundary.append([ig, jg])
                     continue
 
                 is_bulk = True
@@ -958,6 +1124,32 @@ class LBMSolver:
                     self.f[ig, jg][k] = f_eq
                     self.f_new[ig, jg][k] = f_eq
                     self.f_post[ig, jg][k] = f_eq
+
+    @ti.kernel
+    def _apply_density_field(self, rho_arr: ti.types.ndarray()):
+        """將 numpy 密度場寫入 solver。"""
+        for i, j in ti.ndrange(self.nx, self.ny):
+            ig = i + 1
+            jg = j + 1
+            self.rho[ig, jg] = rho_arr[i, j]
+            self.prev_rho[ig, jg] = rho_arr[i, j]
+
+    @ti.kernel
+    def _refresh_equilibrium_from_macro(self):
+        """依當前 rho/u 重建平衡分佈。"""
+        for i, j in ti.ndrange(self.nx_g, self.ny_g):
+            rho_val = self.rho[i, j]
+            u_vec = self.u[i, j]
+            u_sq = u_vec.norm_sqr()
+
+            for k in ti.static(range(9)):
+                eu = self.e[k].dot(u_vec)
+                f_eq = (
+                    self.w[k] * rho_val * (1.0 + 3.0 * eu + 4.5 * eu * eu - 1.5 * u_sq)
+                )
+                self.f[i, j][k] = f_eq
+                self.f_new[i, j][k] = f_eq
+                self.f_post[i, j][k] = f_eq
 
     @ti.func
     def _compute_meq(self, rho: ti.f32, u):

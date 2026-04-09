@@ -94,7 +94,7 @@ def plot_eddy_viscosity(self, nu_sgs, mask=None, ...):
 **使用範例**:
 ```bash
 # 生成渦黏度可視化
-python src/lbm_taichi/utils/visualization.py output_airfoil --type eddy_viscosity --gif
+python src/lbm_taichi/utils/visualization.py output_flow_over_cylinder --type eddy_viscosity --gif
 ```
 
 **預期結果**:
@@ -106,7 +106,7 @@ python src/lbm_taichi/utils/visualization.py output_airfoil --type eddy_viscosit
 
 ### ✅ 3. 實作機翼勢流初始化
 
-**檔案**: `src/lbm_taichi/core/lbm_solver.py`, `examples/airfoil.py`
+**檔案**: `src/lbm_taichi/core/lbm_solver.py`, `examples/airfoil.py`（historical, removed）
 
 **目的**: 為機翼配置提供物理一致的初始速度場，考慮攻角與環量
 
@@ -152,7 +152,7 @@ def init_potential_flow_airfoil(self, chord, aoa_deg, center):
 
 **使用範例**:
 ```python
-# airfoil.py 中自動調用
+# historical airfoil case 中曾自動調用（案例已移除）
 solver.init_potential_flow_airfoil(
     chord=main_chord,
     aoa_deg=aoa,
@@ -183,11 +183,11 @@ python examples/flow_over_cylinder.py --re 10000 --steps 5000
 ### 測試 2: LES 模型驗證（渦黏度分佈）
 
 ```bash
-# 機翼 Re=1000（湍流）
-python examples/airfoil.py --res 256 --re 1000 --aoa 15 --cs 0.16
+# 目前可改用圓柱案例檢查渦黏度場
+python examples/flow_over_cylinder.py --res 256 --re 1000 --cs 0.16
 
 # 生成渦黏度圖
-python src/lbm_taichi/utils/visualization.py output_airfoil --type eddy_viscosity
+python src/lbm_taichi/utils/visualization.py output_flow_over_cylinder --type eddy_viscosity
 
 # 檢查：
 # - 前緣分離: nu_sgs > 0.01
@@ -197,12 +197,7 @@ python src/lbm_taichi/utils/visualization.py output_airfoil --type eddy_viscosit
 ### 測試 3: 機翼勢流初始化效果
 
 ```bash
-# 對比實驗
-python examples/airfoil.py --res 256 --aoa 10 --steps 3000
-
-# 檢查初始輸出（step=0）:
-# - Lift Coefficient (Cl): 應接近 2π*sin(α) ≈ 1.09
-# - 而非從 0 開始
+# `examples/airfoil.py` 已移除；本段保留的是勢流初始化設計背景，而非現行操作指令。
 ```
 
 ---
@@ -250,7 +245,7 @@ src/lbm_taichi/utils/visualization.py
 ├── plot_eddy_viscosity()        [新增] 渦黏度可視化
 └── process_all()                [改進] 支援 eddy_viscosity
 
-examples/airfoil.py
+examples/airfoil.py   [historical, removed]
 └── init_potential_flow_airfoil() [整合] 機翼勢流初始化
 
 examples/flow_over_cylinder.py

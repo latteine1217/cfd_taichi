@@ -7,7 +7,7 @@
 """
 
 import numpy as np
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Union
 
 
 def generate_naca(naca_code: str, num_points: int = 500) -> np.ndarray:
@@ -107,7 +107,7 @@ def create_airfoil_system(
     aoa: float = 0.0,
     slat_angle: float = 15.0,
     flap_angle: float = 30.0,
-    center_position: Optional[Tuple[float, float] | np.ndarray] = None,
+    center_position: Optional[Union[Tuple[float, float], np.ndarray]] = None,
     return_sdf: bool = False,
 ) -> np.ndarray:
     """
@@ -184,6 +184,7 @@ def create_airfoil_system(
         )
 
     if return_sdf:
+        # SDF is returned in lattice units (grid spacing = 1.0)
         sdf = _signed_distance_from_polygons(mask, parts, nx, ny)
         return mask, sdf
 
@@ -333,7 +334,7 @@ def create_stall_resistant_airfoil_system(
     flap2_angle: float = 12.0,
     droop_fraction: float = 0.18,
     droop_amount_ratio: float = 0.04,
-    center_position: Optional[Tuple[float, float] | np.ndarray] = None,
+    center_position: Optional[Union[Tuple[float, float], np.ndarray]] = None,
 ) -> np.ndarray:
     """
     生成失速風險抑制型機翼系統（可變弧度 + 雙段襟翼）
@@ -477,7 +478,7 @@ def create_bioinspired_airfoil_system(
     wave_fraction: float = 0.16,
     wave_amplitude_ratio: float = 0.014,
     coanda_radius_ratio: float = 0.06,
-    center_position: Optional[Tuple[float, float] | np.ndarray] = None,
+    center_position: Optional[Union[Tuple[float, float], np.ndarray]] = None,
 ) -> np.ndarray:
     """
     生成仿生失速抑制機翼（多尺度流動控制）
@@ -657,6 +658,7 @@ def create_circle_mask_and_sdf(nx, ny, center, radius):
     dist = np.sqrt(dx * dx + dy * dy)
     sdf = dist - radius
     mask = (sdf <= 0.0).astype(np.int32)
+    # SDF is returned in lattice units (grid spacing = 1.0)
     return mask, sdf.astype(np.float32)
 
 

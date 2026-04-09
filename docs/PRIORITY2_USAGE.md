@@ -7,6 +7,8 @@
 
 ---
 
+> **注意**：Neumann outflow 已從案例/CLI 移除，一般外流請使用 **Orlanski**。
+
 ## 📋 功能總覽
 
 | 功能 | 用途 | 適用場景 | 計算成本 |
@@ -350,8 +352,8 @@ bc.add_orlanski_outflow(
     rho_target=1.0,
     relaxation=0.3  # ✨ 弱鬆弛
 )
-bc.add_free_slip_wall('top', mode='symmetric')
-bc.add_free_slip_wall('bottom', mode='symmetric')
+bc.add_free_slip_wall('top')
+bc.add_free_slip_wall('bottom')
 
 # 初始化
 solver.reset()
@@ -399,8 +401,8 @@ for alpha in [0.0, 0.1, 0.3, 0.5]:
     bc = BoundaryConditions(solver)
     bc.add_velocity_inlet(0.1, 'left')
     bc.add_orlanski_outflow(location='right', rho_target=1.0, relaxation=alpha)
-    bc.add_free_slip_wall('top', mode='symmetric')
-    bc.add_free_slip_wall('bottom', mode='symmetric')
+    bc.add_free_slip_wall('top')
+    bc.add_free_slip_wall('bottom')
 
     # 運行並收集升力係數
     cl_history = []
@@ -440,7 +442,7 @@ for alpha in [0.0, 0.1, 0.3, 0.5]:
 
 3. **與其他技術結合**
    - ✅ 可與 Sponge Layer 結合（雙重保險）
-   - ✅ 可與 Neumann BC 質量修正結合
+   - ✅ 可與 Neumann 質量修正結合（deprecated）
 
 ---
 

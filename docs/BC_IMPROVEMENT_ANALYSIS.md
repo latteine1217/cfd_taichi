@@ -7,6 +7,8 @@
 
 ---
 
+> **注意**：Neumann outflow 已從案例/CLI 移除，一般外流請使用 **Orlanski**。
+
 ## 執行摘要
 
 經過系統性審查，現有邊界條件實現**整體品質良好**，但存在以下關鍵問題：
@@ -82,7 +84,7 @@ rho_corrected = (1-α)*rho_current + α*rho_target  # α ≈ 0.1-0.5
 
 ---
 
-### 1.3 Neumann Outflow（零梯度）
+### 1.3 Neumann Outflow（零梯度，deprecated）
 
 **現狀**：
 ```python
@@ -106,7 +108,7 @@ for k in ti.static(range(9)):
 
 **建議改進方案**：
 
-#### **方案 A：質量修正的 Neumann BC**（推薦）
+#### **方案 A：質量修正的 Neumann BC**（deprecated）
 ```python
 @ti.kernel
 def _neumann_outflow_mass_corrected(self, f_dst: ti.template()):

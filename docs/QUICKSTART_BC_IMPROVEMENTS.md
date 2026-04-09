@@ -5,25 +5,27 @@
 
 ---
 
+> **注意**：Neumann outflow 已從案例/CLI 移除，一般外流請使用 **Orlanski**。
+
 ## 🚀 3 步驟快速升級
 
-### Step 1: 更新 Neumann BC（30 秒）
+### Step 1: 確認外流使用 Orlanski（30 秒）
 
 **舊代碼**：
 ```python
-bc.add_neumann_outflow('right')
-bc.add_neumann_outflow('top')
-bc.add_neumann_outflow('bottom')
+bc.add_orlanski_outflow('right')
+bc.add_free_slip_wall('top')
+bc.add_free_slip_wall('bottom')
 ```
 
 **新代碼**（只需加一個參數）：
 ```python
-bc.add_neumann_outflow('right', mass_corrected=True)   # 質量修正
-bc.add_neumann_outflow('top', mass_corrected=True)
-bc.add_neumann_outflow('bottom', mass_corrected=True)
+bc.add_orlanski_outflow('right')
+bc.add_free_slip_wall('top')
+bc.add_free_slip_wall('bottom')
 ```
 
-**效果**：質量守恆從 ±0.5-1% → < 0.01%（50-100× 改進）
+**效果**：外流反射更小，質量漂移更穩定
 
 ---
 
@@ -94,9 +96,9 @@ solver.set_obstacle(mask)
 # ✨ 使用改進的邊界條件
 bc = BoundaryConditions(solver)
 bc.add_velocity_inlet(0.1, 'left')
-bc.add_neumann_outflow('right', mass_corrected=True)    # ← 質量修正
-bc.add_neumann_outflow('top', mass_corrected=True)      # ← 質量修正
-bc.add_neumann_outflow('bottom', mass_corrected=True)   # ← 質量修正
+bc.add_orlanski_outflow('right')
+bc.add_free_slip_wall('top')
+bc.add_free_slip_wall('bottom')
 
 solver.reset()
 solver.apply_boundary_conditions(solver.f)
@@ -284,7 +286,7 @@ Validation
 
 | 改進 | 適用場景 | 效果 | 成本 |
 |-----|---------|------|------|
-| **Neumann 質量修正** | 所有 Neumann BC | 質量守恆 50-100× | +0.5% |
+| **Neumann 質量修正（deprecated）** | 內部測試 | 質量守恆 50-100× | +0.5% |
 | **Sponge Layer** | Re > 5000 | 穩定收斂 | +2-3% |
 | **角點外推** | 小計算域 | 精度 5× | +0.1% |
 | **反射波抑制** | 非定常流 | 振盪 -50% | +0.5% |
@@ -325,7 +327,7 @@ Validation
 
 ## ✅ Checklist
 
-- [ ] 已將 `bc.add_neumann_outflow()` 改為 `mass_corrected=True`
+- [ ] 已將出口改為 `bc.add_orlanski_outflow()`
 - [ ] Re > 5000 時已啟用 `enable_sponge=True`
 - [ ] 小計算域已使用 `bc.handle_corners_extrapolation()`
 - [ ] 已運行測試驗證：`python tests/test_bc_improvements.py --test 1`
