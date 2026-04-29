@@ -25,6 +25,10 @@ class CHLBMSolver:
     Cahn-Hilliard + Incompressible LBM 求解器（D2Q9）
     """
 
+    solver_family = "lbm"
+    equation_set = "cahn_hilliard"
+    regime = "low_mach"
+
     def __init__(
         self,
         nx: int,
@@ -419,4 +423,18 @@ class CHLBMSolver:
             "u": u,
             "phi": phi,
             "step": self.step_count,
+        }
+
+    def get_diagnostics(self):
+        """
+        Why: SolverProtocol 要求 get_diagnostics；直接讀 phi/u field 確保 step() 前後語意正確
+        """
+        phi_np = self.phi.to_numpy()[1 : self.nx + 1, 1 : self.ny + 1]
+        u_np = self.u.to_numpy()[1 : self.nx + 1, 1 : self.ny + 1]
+        u_max = float(np.max(np.linalg.norm(u_np, axis=-1)))
+        return {
+            "step_count": int(self.step_count),
+            "phi_min": float(phi_np.min()),
+            "phi_max": float(phi_np.max()),
+            "u_max": u_max,
         }

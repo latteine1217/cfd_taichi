@@ -218,3 +218,38 @@ def test_multiphase_lbm_matches_solver_protocol():
     solver.step()
     diag2 = solver.get_diagnostics()
     assert diag2["step_count"] == 1
+
+
+def test_ch_lbm_matches_solver_protocol():
+    ti.init(arch=ti.cpu, default_fp=ti.f32)
+
+    from lbm_taichi import CHLBMSolver
+
+    solver = CHLBMSolver(
+        nx=16,
+        ny=16,
+        tau=0.8,
+        mobility=0.002,
+    )
+    phi0 = np.zeros((16, 16), dtype=np.float32)
+    phi0[4:12, 4:12] = 1.0
+    phi0[:4, :] = -1.0
+    phi0[12:, :] = -1.0
+    solver.set_initial_phi(phi0)
+
+    assert isinstance(solver, SolverProtocol)
+
+    fields = solver.get_fields()
+    assert "phi" in fields
+    assert "u" in fields
+
+    diag = solver.get_diagnostics()
+    assert "step_count" in diag
+    assert "u_max" in diag
+    assert diag["u_max"] >= 0.0
+    assert diag["step_count"] == 0
+    assert -1.05 <= diag["phi_min"] <= diag["phi_max"] <= 1.05
+
+    solver.step()
+    diag2 = solver.get_diagnostics()
+    assert diag2["step_count"] == 1
