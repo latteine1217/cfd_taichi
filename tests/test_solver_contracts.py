@@ -206,7 +206,15 @@ def test_multiphase_lbm_matches_solver_protocol():
     assert "rhoA" in fields
     assert "u" in fields
 
+    # step() 前的靜態診斷（phi 來自 rhoA/rhoB 語意正確）
     diag = solver.get_diagnostics()
     assert "step_count" in diag
     assert "u_max" in diag
     assert diag["u_max"] >= 0.0
+    assert diag["step_count"] == 0
+    assert -1.05 <= diag["phi_min"] <= diag["phi_max"] <= 1.05
+
+    # step() 後 step_count 遞增
+    solver.step()
+    diag2 = solver.get_diagnostics()
+    assert diag2["step_count"] == 1

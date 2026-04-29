@@ -1068,13 +1068,13 @@ class MultiphaseLBMSolver:
 
     def get_diagnostics(self):
         """
-        What: 匯出診斷量供 CaseRunner / Protocol 層使用
-        Why: SolverProtocol 要求 get_diagnostics；多相流的關鍵診斷是相分率與速度尺度
+        Why: SolverProtocol 要求 get_diagnostics；直接讀 rhoA/rhoB 確保 step() 前後語意正確
         """
-        fields = self.get_fields()
-        phi = fields["phi"]
-        u = fields["u"]
-        u_max = float(np.max(np.linalg.norm(u, axis=-1)))
+        rhoA_np = self.rhoA.to_numpy()[1 : self.nx + 1, 1 : self.ny + 1]
+        rhoB_np = self.rhoB.to_numpy()[1 : self.nx + 1, 1 : self.ny + 1]
+        u_np = self.u.to_numpy()[1 : self.nx + 1, 1 : self.ny + 1]
+        phi = (rhoA_np - rhoB_np) / (rhoA_np + rhoB_np + 1e-12)
+        u_max = float(np.max(np.linalg.norm(u_np, axis=-1)))
         return {
             "step_count": int(self.step_count),
             "phi_min": float(phi.min()),
