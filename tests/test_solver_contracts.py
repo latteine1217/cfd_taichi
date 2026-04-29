@@ -182,3 +182,31 @@ def test_compressible_fvm_solver_control_adapter_configures_nozzle_controls():
     assert diag["mode"] == "local_pseudo"
     assert diag["pseudo_cfl"] > 0.0
     assert diag["u_max"] > 0.0
+
+
+def test_multiphase_lbm_matches_solver_protocol():
+    ti.init(arch=ti.cpu, default_fp=ti.f32)
+
+    from lbm_taichi import MultiphaseLBMSolver
+
+    solver = MultiphaseLBMSolver(
+        nx=16,
+        ny=16,
+        tau_a=0.8,
+        tau_b=0.8,
+        g_interaction=3.5,
+    )
+    rho_a = np.ones((16, 16), dtype=np.float32)
+    rho_b = np.full((16, 16), 0.1, dtype=np.float32)
+    solver.set_initial_fields(rho_a, rho_b)
+
+    assert isinstance(solver, SolverProtocol)
+
+    fields = solver.get_fields()
+    assert "rhoA" in fields
+    assert "u" in fields
+
+    diag = solver.get_diagnostics()
+    assert "step_count" in diag
+    assert "u_max" in diag
+    assert diag["u_max"] >= 0.0

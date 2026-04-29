@@ -37,6 +37,10 @@ class MultiphaseLBMSolver:
     - 需要 RT、密度分層、界面張力的最小可行模擬
     """
 
+    solver_family = "lbm"
+    equation_set = "multiphase"
+    regime = "low_mach"
+
     def __init__(
         self,
         nx: int,
@@ -1060,6 +1064,22 @@ class MultiphaseLBMSolver:
             "u": u_np,
             "mask": mask_np,
             "phi": phi,
+        }
+
+    def get_diagnostics(self):
+        """
+        What: 匯出診斷量供 CaseRunner / Protocol 層使用
+        Why: SolverProtocol 要求 get_diagnostics；多相流的關鍵診斷是相分率與速度尺度
+        """
+        fields = self.get_fields()
+        phi = fields["phi"]
+        u = fields["u"]
+        u_max = float(np.max(np.linalg.norm(u, axis=-1)))
+        return {
+            "step_count": int(self.step_count),
+            "phi_min": float(phi.min()),
+            "phi_max": float(phi.max()),
+            "u_max": u_max,
         }
 
 
