@@ -1073,7 +1073,7 @@ class MultiphaseLBMSolver:
         rhoA_np = self.rhoA.to_numpy()[1 : self.nx + 1, 1 : self.ny + 1]
         rhoB_np = self.rhoB.to_numpy()[1 : self.nx + 1, 1 : self.ny + 1]
         u_np = self.u.to_numpy()[1 : self.nx + 1, 1 : self.ny + 1]
-        phi = (rhoA_np - rhoB_np) / (rhoA_np + rhoB_np + 1e-12)
+        phi = (rhoA_np - rhoB_np) / (rhoA_np + rhoB_np + 1e-12)  # 用 (A-B)/(A+B) 而非 get_fields 的 /rho，保證 phi ∈ [-1,1]
         u_max = float(np.max(np.linalg.norm(u_np, axis=-1)))
         return {
             "step_count": int(self.step_count),
