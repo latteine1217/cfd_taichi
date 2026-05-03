@@ -23,15 +23,10 @@ Why 這個 case?
 """
 
 import os
-import sys
 import taichi as ti
 import numpy as np
 import argparse
 import time
-
-sys.path.insert(
-    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
-)
 
 from lbm_taichi.core import LBMSolver, BoundaryConditions, Diagnostics
 from lbm_taichi.utils.geometry import create_circle_mask_and_sdf
@@ -47,7 +42,7 @@ def run_flow_over_cylinder(
     interval: int = 100,
     tol: float = 1e-5,
     output_dir: str = "output_cylinder",
-    sidewall: str = "outflow",
+    sidewall: str = "orlanski",
     outflow_type: str = "orlanski",
     outlet_relaxation: float = 0.02,
     vtk_output: bool = False,
@@ -67,11 +62,10 @@ def run_flow_over_cylinder(
         tol: 收斂容差
         output_dir: 輸出目錄
         sidewall: 上下邊界類型
-            - 'outflow': 開放邊界（Neumann，模擬無限大空域）【推薦】
+            - 'orlanski': 開放邊界（Orlanski 非反射）
             - 'freeslip': Free-Slip 壁面（模擬風洞側壁）
         outflow_type: 出口邊界類型
             - 'orlanski': 非反射出口（推薦）
-            - 'neumann': Neumann 零梯度出口
     """
     print("=" * 70)
     print(" " * 20 + "FLOW OVER CYLINDER")
@@ -94,20 +88,28 @@ def run_flow_over_cylinder(
     print(f"Cylinder: center=({cx:.1f}, {cy:.1f}), diameter={diameter:.1f}")
 
     # === 初始化求解器 ===
+    auto_les = re > 2000.0
+    cs_eff = cs if cs > 0.0 else (0.16 if auto_les else cs)
+
     solver = LBMSolver(
         nx=nx,
         ny=ny,
         re=re,
         u_ref=u_in,
         length_scale=diameter,
-        cs=cs,
+        cs=cs_eff,
         collision_model=collision_model,
     )
+    if re > 1000.0:
+        solver.set_wall_function(enabled=True, yplus_min=5.0)
+        print("Wall Function: Enabled (Re > 1000, yplus_min=5.0)")
+    else:
+        solver.set_wall_function(enabled=False)
+        print("Wall Function: Disabled (Re <= 1000)")
 
     # === 設定障礙物 ===
     mask, sdf = create_circle_mask_and_sdf(nx, ny, center=(cx, cy), radius=radius)
-    solver.set_obstacle(mask, sdf_array=sdf)
-    solver._correct_solid_velocity()
+    solver.initialize_obstacle(mask, sdf_array=sdf)
 
     # === 勢流初始化（減少初始擾動）===
     solver.init_potential_flow_cylinder(cx=cx, cy=cy, radius=radius)
@@ -143,20 +145,21 @@ def run_flow_over_cylinder(
         )
         print(f"  Outflow Type: Orlanski Outflow (relaxation={outlet_relaxation})")
     elif outflow_type == "neumann":
-        bc.add_neumann_outflow(location="right")
-        print(f"  Outflow Type: Neumann (zero-gradient)")
+        raise ValueError("Neumann outflow removed; use --outflow orlanski")
     else:
         raise ValueError(f"Unknown outflow_type: {outflow_type}")
 
     # 上下邊界：根據 sidewall 選擇
-    if sidewall == "outflow":
-        bc.add_neumann_outflow("top")
-        bc.add_neumann_outflow("bottom")
-        print(f"  Sidewall Type: Neumann Outflow (open domain)")
+    if sidewall == "orlanski":
+        bc.add_orlanski_outflow(location="top", relaxation=outlet_relaxation)
+        bc.add_orlanski_outflow(location="bottom", relaxation=outlet_relaxation)
+        print(
+            f"  Sidewall Type: Orlanski Outflow (open sky, relaxation={outlet_relaxation})"
+        )
     elif sidewall == "freeslip":
-        bc.add_free_slip_wall("top", mode="symmetric")
-        bc.add_free_slip_wall("bottom", mode="symmetric")
-        print(f"  Sidewall Type: Free-Slip (wind tunnel)")
+        bc.add_free_slip_wall("top")
+        bc.add_free_slip_wall("bottom")
+        print("  Sidewall Type: Free-Slip (wind tunnel)")
     else:
         raise ValueError(f"Unknown sidewall type: {sidewall}")
 
@@ -171,7 +174,7 @@ def run_flow_over_cylinder(
     print(f"Reynolds Number: {re}")
     print(f"Inlet Velocity: {u_in}")
     print(f"Viscosity: {solver.nu:.6f}")
-    if cs > 0.0:
+    if cs_eff > 0.0:
         print("LES Model: Dynamic Smagorinsky (auto Cs)")
     else:
         print("LES Model: Disabled")
@@ -182,10 +185,7 @@ def run_flow_over_cylinder(
     global_start = time.time()
 
     # 記錄初始質量與能量
-    solver._update_macro(solver.f)
-    solver._update_diagnostics()
-    solver.initial_mass[None] = solver.total_mass[None]
-    solver.initial_KE[None] = solver.total_KE[None]
+    solver.prepare_diagnostics(reset_baseline=True)
     diag.save_data(0, additional_data={"cd": 0.0, "cl": 0.0})
 
     # 模擬開始時間
@@ -199,8 +199,7 @@ def run_flow_over_cylinder(
         solver.step(f_src, f_dst)
 
         if step % 100 == 0:
-            solver._update_macro(f_dst)
-            solver._update_diagnostics()
+            solver.prepare_diagnostics(f_dst)
             ti.sync()
 
             total_elapsed = time.time() - sim_start
@@ -233,7 +232,7 @@ def run_flow_over_cylinder(
                 break
 
         elif step % interval == 0:
-            solver._update_macro(f_dst)
+            solver.prepare_diagnostics(f_dst)
             cd, cl = diag.get_force_coefficients()
             diag.record_forces(step, cd, cl)
             diag.save_data(step, additional_data={"cd": cd, "cl": cl})
@@ -262,24 +261,20 @@ def run_flow_over_cylinder(
         print(f"Strouhal  : {st:.4f}")
 
     # 存儲歷史數據
-    history_file = os.path.join(output_dir, "history.npy")
-    np.save(
-        history_file,
-        {
-            "headers": headers,
-            "data": diag.history,
-            "params": {
-                "res_y": res_y,
-                "re": re,
-                "u_in": u_in,
-                "diameter": diameter,
-                "cs": cs,
-            },
+    history_file = diag.save_history(
+        params={
+            "res_y": res_y,
+            "re": re,
+            "u_in": u_in,
+            "diameter": diameter,
+            "cs": cs,
+        },
+        additional_payload={
             "dfg": {
                 "cd_mean": stats.get("cd_mean", 0.0),
                 "cl_rms": stats.get("cl_rms", 0.0),
                 "strouhal": st,
-            },
+            }
         },
     )
     print(f"📊 History saved to {history_file}")
@@ -324,16 +319,9 @@ def main():
     parser.add_argument(
         "--sidewall",
         type=str,
-        default="outflow",
-        choices=["outflow", "freeslip"],
-        help="Top/bottom boundary: outflow (open domain) or freeslip (wind tunnel)",
-    )
-    parser.add_argument(
-        "--outflow",
-        type=str,
         default="orlanski",
-        choices=["orlanski", "neumann"],
-        help="Right outlet type: orlanski or neumann",
+        choices=["orlanski", "freeslip"],
+        help="Top/bottom boundary: orlanski (open sky) or freeslip (wind tunnel)",
     )
     parser.add_argument(
         "--outlet_relax",
@@ -369,7 +357,7 @@ def main():
         tol=args.tol,
         output_dir=args.output,
         sidewall=args.sidewall,
-        outflow_type=args.outflow,
+        outflow_type="orlanski",
         outlet_relaxation=args.outlet_relax,
         vtk_output=args.vtk,
         collision_model=args.collision,

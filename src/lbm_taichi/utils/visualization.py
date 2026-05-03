@@ -228,6 +228,26 @@ class Visualizer:
         cache["ax"].set_title(title)
         cache["fig"].savefig(save_path, bbox_inches="tight")
 
+    def _init_phi_render(self, nx: int, ny: int, vmin: float, vmax: float):
+        fig, ax = self._get_figure(nx, ny)
+        im = ax.imshow(
+            np.zeros((ny, nx)),
+            origin="lower",
+            cmap="RdBu_r",
+            interpolation="bilinear",
+            extent=[0, nx, 0, ny],
+            aspect="equal",
+            vmin=vmin,
+            vmax=vmax,
+        )
+        plt.colorbar(im, ax=ax, label="phi", fraction=0.046, pad=0.04)
+        return {"fig": fig, "ax": ax, "im": im}
+
+    def _update_phi_render(self, cache, phi, title, save_path):
+        cache["im"].set_data(phi.T)
+        cache["ax"].set_title(title)
+        cache["fig"].savefig(save_path, bbox_inches="tight")
+
     def _scan_global_ranges(
         self, files: List[str], plot_types: List[str]
     ) -> Dict[str, Dict[str, float]]:
@@ -235,6 +255,7 @@ class Visualizer:
             "velocity": {"min": np.inf, "max": -np.inf},
             "vorticity": {"min": np.inf, "max": -np.inf},
             "eddy_viscosity": {"min": np.inf, "max": -np.inf},
+            "phi": {"min": np.inf, "max": -np.inf},
         }
 
         for f in files:
@@ -242,6 +263,7 @@ class Visualizer:
             u = data["u"]
             mask = data.get("mask", None)
             nu_sgs = data.get("nu_sgs", None)
+            phi = data.get("phi", None)
 
             if "velocity" in plot_types:
                 u_mag = np.linalg.norm(u, axis=2)
@@ -281,12 +303,23 @@ class Visualizer:
                         ranges["eddy_viscosity"]["max"], float(nu_sgs.max())
                     )
 
+            if "phi" in plot_types and phi is not None:
+                if phi.size > 0:
+                    ranges["phi"]["min"] = min(
+                        ranges["phi"]["min"], float(phi.min())
+                    )
+                    ranges["phi"]["max"] = max(
+                        ranges["phi"]["max"], float(phi.max())
+                    )
+
         if ranges["velocity"]["min"] == np.inf:
             ranges["velocity"] = {"min": 0.0, "max": 1.0}
         if ranges["vorticity"]["min"] == np.inf:
             ranges["vorticity"] = {"min": -1.0, "max": 1.0}
         if ranges["eddy_viscosity"]["min"] == np.inf:
             ranges["eddy_viscosity"] = {"min": 1e-6, "max": 1e-3}
+        if ranges["phi"]["min"] == np.inf:
+            ranges["phi"] = {"min": -1.0, "max": 1.0}
 
         return ranges
 
@@ -329,12 +362,23 @@ class Visualizer:
                     ranges["eddy_viscosity"]["min"],
                     ranges["eddy_viscosity"]["max"],
                 )
+            if "phi" in plot_types:
+                self._render_cache["phi"] = self._init_phi_render(
+                    nx,
+                    ny,
+                    ranges["phi"]["min"],
+                    ranges["phi"]["max"],
+                )
 
         for i, f in enumerate(files):
             data = np.load(f, allow_pickle=True).item()
-            step, u, rho, mask = data["step"], data["u"], data["rho"], data["mask"]
+            step = data["step"]
+            u = data["u"]
+            rho = data.get("rho", None)
+            mask = data.get("mask", None)
             particles = data.get("particles", None)
             nu_sgs = data.get("nu_sgs", None)
+            phi = data.get("phi", None)
 
             if particles is not None and len(particles) > max_particles:
                 idx = rng.choice(len(particles), size=max_particles, replace=False)
@@ -378,6 +422,16 @@ class Visualizer:
                         cache,
                         nu_sgs,
                         f"Eddy Viscosity Step {step}",
+                        save_name,
+                    )
+                elif p_type == "phi":
+                    if phi is None:
+                        continue
+                    cache = self._render_cache["phi"]
+                    self._update_phi_render(
+                        cache,
+                        phi,
+                        f"Phase Field Step {step}",
                         save_name,
                     )
 

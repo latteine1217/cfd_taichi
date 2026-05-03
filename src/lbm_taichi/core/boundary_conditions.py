@@ -81,8 +81,12 @@ class BoundaryConditions:
         # Orlanski 出口緩衝區
         self.outflow_relax_right = ti.field(dtype=ti.f32, shape=())
         self.outflow_relax_left = ti.field(dtype=ti.f32, shape=())
+        self.outflow_relax_top = ti.field(dtype=ti.f32, shape=())
+        self.outflow_relax_bottom = ti.field(dtype=ti.f32, shape=())
         self.outflow_rho_target_right = ti.field(dtype=ti.f32, shape=())
         self.outflow_rho_target_left = ti.field(dtype=ti.f32, shape=())
+        self.outflow_rho_target_top = ti.field(dtype=ti.f32, shape=())
+        self.outflow_rho_target_bottom = ti.field(dtype=ti.f32, shape=())
         self.rho_outflow_right = ti.field(dtype=ti.f32, shape=self.ny)
         self.rho_outflow_left = ti.field(dtype=ti.f32, shape=self.ny)
         self.rho_outflow_top = ti.field(dtype=ti.f32, shape=self.nx)
@@ -103,11 +107,11 @@ class BoundaryConditions:
         self,
         u_in: float,
         location: str = "left",
-        mode: str = "zouhe",
         epsilon: float = 0.02,
         omega=None,
         strouhal: float = 0.2,
         asymmetry: float = 0.0,
+        method: str = "neq",
     ):
         """
         添加固定速度入口邊界
@@ -120,11 +124,11 @@ class BoundaryConditions:
         Args:
             u_in: 入口速度 (lattice units)
             location: 'left', 'right', 'top', 'bottom'
-            mode: 'zouhe' 或 'neq'（Guo 非平衡外推）
             epsilon: 時間性正弦擾動幅度（相對值，1%~5%）
             omega: 擾動角頻率（rad/step），None 時用 Strouhal 估算
             strouhal: Strouhal 數（用於估算 omega）
             asymmetry: 入口速度上下非對稱擾動幅度（相對 u_in）
+            method: 'neq' (Guo 非平衡外推) or 'zouhe' (標準 Zou-He)
         """
         self.u_inlet[None] = u_in
         self.u_inlet_perturb[None] = epsilon
@@ -138,25 +142,21 @@ class BoundaryConditions:
             )
             self._inlet_time_enabled = True
 
-        if mode not in {"zouhe", "neq"}:
-            raise ValueError(f"Invalid inlet mode: {mode}")
+        if method == "neq":
+            left_kernel = self._velocity_inlet_left_neq
+            right_kernel = self._velocity_inlet_right_neq
+            tag = "Velocity Inlet NEQ"
+        elif method == "zouhe":
+            left_kernel = self._velocity_inlet_left
+            right_kernel = self._velocity_inlet_right
+            tag = "Velocity Inlet Zou-He"
+        else:
+            raise ValueError(f"Unknown inlet method: {method}")
 
         if location == "left":
-            kernel = (
-                self._velocity_inlet_left
-                if mode == "zouhe"
-                else self._velocity_inlet_left_neq
-            )
-            self.solver.add_boundary_condition(kernel, f"Velocity Inlet (Left, {mode})")
+            self.solver.add_boundary_condition(left_kernel, f"{tag} (Left)")
         elif location == "right":
-            kernel = (
-                self._velocity_inlet_right
-                if mode == "zouhe"
-                else self._velocity_inlet_right_neq
-            )
-            self.solver.add_boundary_condition(
-                kernel, f"Velocity Inlet (Right, {mode})"
-            )
+            self.solver.add_boundary_condition(right_kernel, f"{tag} (Right)")
         else:
             raise NotImplementedError(
                 f"Location '{location}' not implemented for velocity inlet"
@@ -267,6 +267,11 @@ class BoundaryConditions:
         else:
             raise ValueError(f"Invalid location: {location}")
 
+        # mask 已改變，自動重建索引列表。
+        # Why: bulk/boundary/solid 分類依賴 mask，設完壁面即刻使其一致；
+        #      無需呼叫端手動呼叫 solver._build_index_lists()。
+        self.solver.rebuild_index_lists()
+
     def set_corners_solid(self):
         """
         將四個角點設為固體（mask=1）
@@ -357,6 +362,57 @@ class BoundaryConditions:
                 f_dst[self.nx, self.ny][k] = 0.5 * (f1 + f2)
 
     @ti.kernel
+    def _handle_ldc_corners_kernel(self, f_dst: ti.template()):
+        """
+        LDC 專用角點處理：以局部平衡分佈重建四個角點，避免 generic average
+        在閉合腔體中持續注入小的非物理質量誤差。
+
+        策略：
+        - top-left / top-right: 使用 lid 端點速度（通常平滑 profile 端點接近 0）
+        - bottom-left / bottom-right: 使用靜止壁面速度 (0, 0)
+        - rho 使用相鄰內部流體節點平均
+        """
+        # bottom-left
+        if self.solver.mask[1, 1] == 0:
+            rho_w = 0.5 * (self.solver.rho[2, 1] + self.solver.rho[1, 2])
+            u = ti.Vector([0.0, 0.0])
+            u_sq = u.norm_sqr()
+            for k in ti.static(range(9)):
+                eu = self.solver.e[k].dot(u)
+                f_eq = self.solver.w[k] * rho_w * (1.0 + 3.0 * eu + 4.5 * eu * eu - 1.5 * u_sq)
+                f_dst[1, 1][k] = f_eq
+
+        # bottom-right
+        if self.solver.mask[self.nx, 1] == 0:
+            rho_w = 0.5 * (self.solver.rho[self.nx - 1, 1] + self.solver.rho[self.nx, 2])
+            u = ti.Vector([0.0, 0.0])
+            u_sq = u.norm_sqr()
+            for k in ti.static(range(9)):
+                eu = self.solver.e[k].dot(u)
+                f_eq = self.solver.w[k] * rho_w * (1.0 + 3.0 * eu + 4.5 * eu * eu - 1.5 * u_sq)
+                f_dst[self.nx, 1][k] = f_eq
+
+        # top-left
+        if self.solver.mask[1, self.ny] == 0:
+            rho_w = 0.5 * (self.solver.rho[2, self.ny] + self.solver.rho[1, self.ny - 1])
+            u = ti.Vector([self.u_wall_field[0], 0.0])
+            u_sq = u.norm_sqr()
+            for k in ti.static(range(9)):
+                eu = self.solver.e[k].dot(u)
+                f_eq = self.solver.w[k] * rho_w * (1.0 + 3.0 * eu + 4.5 * eu * eu - 1.5 * u_sq)
+                f_dst[1, self.ny][k] = f_eq
+
+        # top-right
+        if self.solver.mask[self.nx, self.ny] == 0:
+            rho_w = 0.5 * (self.solver.rho[self.nx - 1, self.ny] + self.solver.rho[self.nx, self.ny - 1])
+            u = ti.Vector([self.u_wall_field[self.nx - 1], 0.0])
+            u_sq = u.norm_sqr()
+            for k in ti.static(range(9)):
+                eu = self.solver.e[k].dot(u)
+                f_eq = self.solver.w[k] * rho_w * (1.0 + 3.0 * eu + 4.5 * eu * eu - 1.5 * u_sq)
+                f_dst[self.nx, self.ny][k] = f_eq
+
+    @ti.kernel
     def _set_mask_top(self, exclude_corners: ti.i32):
         """設置頂部為固體壁面"""
         start = 1 if exclude_corners else 0
@@ -388,7 +444,7 @@ class BoundaryConditions:
         for j in range(start, end):
             self.solver.mask[self.nx, j + 1] = 1
 
-    def add_periodic_boundary(self, direction: str, mode: str = "buffered"):
+    def add_periodic_boundary(self, direction: str):
         """
         添加週期邊界條件（Periodic Boundary Conditions）
 
@@ -414,34 +470,20 @@ class BoundaryConditions:
 
         Args:
             direction: 'x' 或 'y'
-            mode: 'buffered' 使用內部節點緩衝, 'direct' 直接對邊界交換
+            direction: 'x' 或 'y'
         """
         if direction == "x":
-            if mode == "buffered":
-                self.solver.add_boundary_condition(
-                    self._periodic_x, "Periodic (X-direction, Buffered)"
-                )
-            elif mode == "direct":
-                self.solver.add_boundary_condition(
-                    self._periodic_x_direct, "Periodic (X-direction, Direct)"
-                )
-            else:
-                raise ValueError(f"Invalid periodic mode: {mode}")
+            self.solver.add_boundary_condition(
+                self._periodic_x, "Periodic (X-direction)"
+            )
         elif direction == "y":
-            if mode == "buffered":
-                self.solver.add_boundary_condition(
-                    self._periodic_y, "Periodic (Y-direction, Buffered)"
-                )
-            elif mode == "direct":
-                self.solver.add_boundary_condition(
-                    self._periodic_y_direct, "Periodic (Y-direction, Direct)"
-                )
-            else:
-                raise ValueError(f"Invalid periodic mode: {mode}")
+            self.solver.add_boundary_condition(
+                self._periodic_y, "Periodic (Y-direction)"
+            )
         else:
             raise ValueError(f"Invalid direction: {direction}. Use 'x' or 'y'.")
 
-    def add_free_slip_wall(self, location: str, mode: str = "symmetric"):
+    def add_free_slip_wall(self, location: str):
         """
         添加 Free-Slip 壁面（Zou-He 類型，改進版）
 
@@ -458,39 +500,19 @@ class BoundaryConditions:
 
         Args:
             location: 'top', 'bottom', 'left', 'right'
-            mode: 'symmetric' 對稱延拓, 'zouhe' Zou-He 重建
         """
-        if mode not in {"symmetric", "zouhe"}:
-            raise ValueError(f"Invalid free-slip mode: {mode}")
-
         if location == "top":
-            kernel = (
-                self._free_slip_top_symmetric
-                if mode == "symmetric"
-                else self._free_slip_top
-            )
-            self.solver.add_boundary_condition(kernel, f"Free-Slip (Top, {mode})")
+            self.solver.add_boundary_condition(self._free_slip_top, "Free-Slip (Top)")
         elif location == "bottom":
-            kernel = (
-                self._free_slip_bottom_symmetric
-                if mode == "symmetric"
-                else self._free_slip_bottom
+            self.solver.add_boundary_condition(
+                self._free_slip_bottom, "Free-Slip (Bottom)"
             )
-            self.solver.add_boundary_condition(kernel, f"Free-Slip (Bottom, {mode})")
         elif location == "left":
-            kernel = (
-                self._free_slip_left_symmetric
-                if mode == "symmetric"
-                else self._free_slip_left
-            )
-            self.solver.add_boundary_condition(kernel, f"Free-Slip (Left, {mode})")
+            self.solver.add_boundary_condition(self._free_slip_left, "Free-Slip (Left)")
         elif location == "right":
-            kernel = (
-                self._free_slip_right_symmetric
-                if mode == "symmetric"
-                else self._free_slip_right
+            self.solver.add_boundary_condition(
+                self._free_slip_right, "Free-Slip (Right)"
             )
-            self.solver.add_boundary_condition(kernel, f"Free-Slip (Right, {mode})")
         else:
             raise ValueError(f"Invalid location: {location}")
 
@@ -499,6 +521,7 @@ class BoundaryConditions:
         velocity_profile: np.ndarray,
         location: str = "top",
         handle_corners: bool = True,
+        corner_mode: str = "generic",
     ):
         """
         添加運動壁面（用於 Lid-Driven Cavity）
@@ -511,7 +534,9 @@ class BoundaryConditions:
         Args:
             velocity_profile: (nx,) 陣列，每個 x 位置的壁面速度
             location: 'top', 'bottom'
-            handle_corners: 是否啟用角點外推（避免角點奇異）
+            handle_corners: 是否處理角點
+            corner_mode: 'generic' 使用既有平均外推；'ldc' 使用 lid-driven cavity
+                專用角點平衡態重建（較一致，減少角點漏量）
         """
         if velocity_profile.shape[0] != self.nx:
             raise ValueError(
@@ -534,7 +559,12 @@ class BoundaryConditions:
             )
 
         if handle_corners:
-            self.handle_corners_extrapolation()
+            if corner_mode == "ldc" and location == "top":
+                self.solver.add_boundary_condition(
+                    self._handle_ldc_corners_kernel, "LDC Corner Reconstruction"
+                )
+            else:
+                self.handle_corners_extrapolation()
 
     @ti.kernel
     def _init_mass_correction(self):
@@ -560,7 +590,7 @@ class BoundaryConditions:
             - 尾流、剪切不穩定、渦脫落
 
         Args:
-            location: 'right' 或 'left'
+            location: 'right', 'left', 'top', 'bottom'
             rho_target: 目標密度（弱鬆弛用）
             relaxation: 鬆弛係數（0-0.1，建議 0.02）
         """
@@ -575,6 +605,18 @@ class BoundaryConditions:
             self.outflow_rho_target_left[None] = rho_target
             self.solver.add_boundary_condition(
                 self._orlanski_outflow_left, "Orlanski Outflow (Left)"
+            )
+        elif location == "top":
+            self.outflow_relax_top[None] = relaxation
+            self.outflow_rho_target_top[None] = rho_target
+            self.solver.add_boundary_condition(
+                self._orlanski_outflow_top, "Orlanski Outflow (Top)"
+            )
+        elif location == "bottom":
+            self.outflow_relax_bottom[None] = relaxation
+            self.outflow_rho_target_bottom[None] = rho_target
+            self.solver.add_boundary_condition(
+                self._orlanski_outflow_bottom, "Orlanski Outflow (Bottom)"
             )
         else:
             raise ValueError(f"Invalid location: {location}")
@@ -649,8 +691,12 @@ class BoundaryConditions:
 
         self.outflow_relax_right[None] = 0.02
         self.outflow_relax_left[None] = 0.02
+        self.outflow_relax_top[None] = 0.02
+        self.outflow_relax_bottom[None] = 0.02
         self.outflow_rho_target_right[None] = 1.0
         self.outflow_rho_target_left[None] = 1.0
+        self.outflow_rho_target_top[None] = 1.0
+        self.outflow_rho_target_bottom[None] = 1.0
         self.outflow_smooth_strength[None] = 0.02
 
     @ti.kernel
@@ -770,6 +816,108 @@ class BoundaryConditions:
 
                 self.rho_outflow_left[j] = rho_new
                 self.u_outflow_left[j] = u_new
+
+    @ti.kernel
+    def _orlanski_outflow_top(self, f_dst: ti.template()):
+        for i in range(self.nx):
+            ig = i + 1
+            if self.solver.mask[ig, self.ny] == 0:
+                rho_i, u_i = self._compute_macro_from_f(f_dst[ig, self.ny - 1])
+                c_s = ti.sqrt(1.0 / 3.0)
+                c = ti.max(u_i[1] + c_s, 0.0)
+                c = ti.min(c, 1.0)
+
+                rho_prev = self.rho_outflow_top[i]
+                u_prev = self.u_outflow_top[i]
+
+                rho_new = rho_prev - c * (rho_prev - rho_i)
+                u_new = u_prev - c * (u_prev - u_i)
+
+                if c < 1e-6:
+                    rho_new = rho_i
+                    u_new = u_i
+
+                alpha = self.outflow_relax_top[None]
+                rho_target = self.outflow_rho_target_top[None]
+                rho_new = (1.0 - alpha) * rho_new + alpha * rho_target
+                rho_new = ti.max(rho_new, 1e-6)
+
+                beta = self.outflow_smooth_strength[None]
+                rho_new = (1.0 - beta) * rho_new + beta * rho_i
+                u_new = (1.0 - beta) * u_new + beta * u_i
+
+                u_sq = u_new.dot(u_new)
+                u_i_sq = u_i.dot(u_i)
+                for k in ti.static(range(9)):
+                    e_k = ti.cast(self.solver.e[k], ti.f32)
+                    eu_new = e_k.dot(u_new)
+                    eu_i = e_k.dot(u_i)
+                    feq_new = (
+                        self.solver.w[k]
+                        * rho_new
+                        * (1.0 + 3.0 * eu_new + 4.5 * eu_new * eu_new - 1.5 * u_sq)
+                    )
+                    feq_i = (
+                        self.solver.w[k]
+                        * rho_i
+                        * (1.0 + 3.0 * eu_i + 4.5 * eu_i * eu_i - 1.5 * u_i_sq)
+                    )
+                    f_dst[ig, self.ny][k] = feq_new + (
+                        f_dst[ig, self.ny - 1][k] - feq_i
+                    )
+
+                self.rho_outflow_top[i] = rho_new
+                self.u_outflow_top[i] = u_new
+
+    @ti.kernel
+    def _orlanski_outflow_bottom(self, f_dst: ti.template()):
+        for i in range(self.nx):
+            ig = i + 1
+            if self.solver.mask[ig, 1] == 0:
+                rho_i, u_i = self._compute_macro_from_f(f_dst[ig, 2])
+                c_s = ti.sqrt(1.0 / 3.0)
+                c = ti.max(-u_i[1] + c_s, 0.0)
+                c = ti.min(c, 1.0)
+
+                rho_prev = self.rho_outflow_bottom[i]
+                u_prev = self.u_outflow_bottom[i]
+
+                rho_new = rho_prev - c * (rho_prev - rho_i)
+                u_new = u_prev - c * (u_prev - u_i)
+
+                if c < 1e-6:
+                    rho_new = rho_i
+                    u_new = u_i
+
+                alpha = self.outflow_relax_bottom[None]
+                rho_target = self.outflow_rho_target_bottom[None]
+                rho_new = (1.0 - alpha) * rho_new + alpha * rho_target
+                rho_new = ti.max(rho_new, 1e-6)
+
+                beta = self.outflow_smooth_strength[None]
+                rho_new = (1.0 - beta) * rho_new + beta * rho_i
+                u_new = (1.0 - beta) * u_new + beta * u_i
+
+                u_sq = u_new.dot(u_new)
+                u_i_sq = u_i.dot(u_i)
+                for k in ti.static(range(9)):
+                    e_k = ti.cast(self.solver.e[k], ti.f32)
+                    eu_new = e_k.dot(u_new)
+                    eu_i = e_k.dot(u_i)
+                    feq_new = (
+                        self.solver.w[k]
+                        * rho_new
+                        * (1.0 + 3.0 * eu_new + 4.5 * eu_new * eu_new - 1.5 * u_sq)
+                    )
+                    feq_i = (
+                        self.solver.w[k]
+                        * rho_i
+                        * (1.0 + 3.0 * eu_i + 4.5 * eu_i * eu_i - 1.5 * u_i_sq)
+                    )
+                    f_dst[ig, 1][k] = feq_new + (f_dst[ig, 2][k] - feq_i)
+
+                self.rho_outflow_bottom[i] = rho_new
+                self.u_outflow_bottom[i] = u_new
 
     # ==================== Zou-He 入口 ====================
 
@@ -907,10 +1055,14 @@ class BoundaryConditions:
                 _, u_inner = self._compute_macro_from_f(f_dst[ig, 2])
                 u_x = u_inner[0]
 
-                # Zou-He 重建未知分佈函數
+                # Zou-He 重建未知分佈函數（Krüger 2017）
                 f_dst[ig, 1][2] = f4
-                f_dst[ig, 1][5] = f7 + (1.0 / 6.0) * rho * u_x
-                f_dst[ig, 1][6] = f8 - (1.0 / 6.0) * rho * u_x
+                f_dst[ig, 1][5] = (
+                    f7 + 0.5 * (f1 - f3) + (1.0 / 6.0) * rho * u_x
+                )
+                f_dst[ig, 1][6] = (
+                    f8 - 0.5 * (f1 - f3) - (1.0 / 6.0) * rho * u_x
+                )
 
     @ti.kernel
     def _free_slip_top(self, f_dst: ti.template()):
@@ -932,10 +1084,14 @@ class BoundaryConditions:
                 _, u_inner = self._compute_macro_from_f(f_dst[ig, self.ny - 1])
                 u_x = u_inner[0]
 
-                # Zou-He 重建
+                # Zou-He 重建（Krüger 2017）
                 f_dst[ig, self.ny][4] = f2
-                f_dst[ig, self.ny][7] = f6 - (1.0 / 6.0) * rho * u_x
-                f_dst[ig, self.ny][8] = f5 + (1.0 / 6.0) * rho * u_x
+                f_dst[ig, self.ny][7] = (
+                    f5 - (1.0 / 6.0) * rho * u_x + 0.5 * (f1 - f3)
+                )
+                f_dst[ig, self.ny][8] = (
+                    f6 + (1.0 / 6.0) * rho * u_x - 0.5 * (f1 - f3)
+                )
 
     @ti.kernel
     def _free_slip_left(self, f_dst: ti.template()):
@@ -957,10 +1113,14 @@ class BoundaryConditions:
                 _, u_inner = self._compute_macro_from_f(f_dst[2, jg])
                 u_y = u_inner[1]
 
-                # Zou-He 重建
+                # Zou-He 重建（Krüger 2017）
                 f_dst[1, jg][1] = f3
-                f_dst[1, jg][5] = f7 + (1.0 / 6.0) * rho * u_y
-                f_dst[1, jg][8] = f6 - (1.0 / 6.0) * rho * u_y
+                f_dst[1, jg][5] = (
+                    f7 + 0.5 * (f2 - f4) + (1.0 / 6.0) * rho * u_y
+                )
+                f_dst[1, jg][8] = (
+                    f6 - 0.5 * (f2 - f4) - (1.0 / 6.0) * rho * u_y
+                )
 
     @ti.kernel
     def _free_slip_right(self, f_dst: ti.template()):
@@ -982,10 +1142,14 @@ class BoundaryConditions:
                 _, u_inner = self._compute_macro_from_f(f_dst[self.nx - 1, jg])
                 u_y = u_inner[1]
 
-                # Zou-He 重建
+                # Zou-He 重建（Krüger 2017）
                 f_dst[self.nx, jg][3] = f1
-                f_dst[self.nx, jg][6] = f8 - (1.0 / 6.0) * rho * u_y
-                f_dst[self.nx, jg][7] = f5 + (1.0 / 6.0) * rho * u_y
+                f_dst[self.nx, jg][6] = (
+                    f8 + 0.5 * (f4 - f2) - (1.0 / 6.0) * rho * u_y
+                )
+                f_dst[self.nx, jg][7] = (
+                    f5 + 0.5 * (f2 - f4) + (1.0 / 6.0) * rho * u_y
+                )
 
     @ti.kernel
     def _free_slip_bottom_symmetric(self, f_dst: ti.template()):
@@ -1291,9 +1455,11 @@ class BoundaryConditions:
                 rho_w = f0 + f1 + f3 + 2.0 * (f2 + f5 + f6)
 
                 # Zou-He 重建未知分佈函數
+                # 推導：f7 + f8 = f5 + f6（vy=0 約束），f8 - f7 = rho_w*u_wall - (f1-f3+f5-f6)
+                # 解得：係數為 1/2（非 inlet BC 的 1/6；inlet 係數適用於法向速度，此處為切向）
                 f_dst[ig, jg][4] = f2
-                f_dst[ig, jg][7] = f5 - (1.0 / 6.0) * rho_w * u_wall + 0.5 * (f1 - f3)
-                f_dst[ig, jg][8] = f6 + (1.0 / 6.0) * rho_w * u_wall - 0.5 * (f1 - f3)
+                f_dst[ig, jg][7] = f5 - (0.5) * rho_w * u_wall + 0.5 * (f1 - f3)
+                f_dst[ig, jg][8] = f6 + (0.5) * rho_w * u_wall - 0.5 * (f1 - f3)
 
     @ti.kernel
     def _moving_wall_bottom(self, f_dst: ti.template()):
@@ -1314,10 +1480,789 @@ class BoundaryConditions:
                 # 質量守恆推導密度（v_y = 0 at wall）
                 rho_w = f0 + f1 + f3 + 2.0 * (f4 + f7 + f8)
 
-                # Zou-He 重建未知分佈函數
+                # Zou-He 重建未知分佈函數（切向速度係數 1/2）
                 f_dst[ig, jg][2] = f4
-                f_dst[ig, jg][5] = f7 + (1.0 / 6.0) * rho_w * u_wall + 0.5 * (f1 - f3)
-                f_dst[ig, jg][6] = f8 - (1.0 / 6.0) * rho_w * u_wall - 0.5 * (f1 - f3)
+                f_dst[ig, jg][5] = f7 + (0.5) * rho_w * u_wall + 0.5 * (f1 - f3)
+                f_dst[ig, jg][6] = f8 - (0.5) * rho_w * u_wall - 0.5 * (f1 - f3)
+
+    # ==================== Periodic Boundary Conditions ====================
+
+    @ti.kernel
+    def _periodic_x(self, f_dst: ti.template()):
+        """
+        X 方向週期邊界條件（方向選擇性補缺）
+
+        What: 補充左右邊界 push 串流後缺失的方向分量
+        Why:  Push 串流後：
+              - 左邊界 ig=1 缺少向東分量（k=1,5,8），因左側無 ghost 推送
+              - 右邊界 ig=nx 缺少向西分量（k=3,6,7），因右側無 ghost 推送
+              只補缺失分量，保留其餘正確分量，避免 full swap 汙染正確值。
+
+        修正說明（vs. 舊版 full swap）：
+            舊版 full swap 覆蓋所有 9 個分量，會把正確的西向分量（k=3,6,7）
+            從右邊界「stale」值複製到左邊界，損害準確性。
+            新版 direction-specific：只填寫確實缺失的方向分量，
+            東向缺失（k=1,5,8）和西向缺失（k=3,6,7）是不相交集合，
+            故無需保存舊值即可正確雙向填補。
+
+        D2Q9 方向：
+            東向 e_x=+1: k=1(E), k=5(NE), k=8(SE) → 左邊界 ig=1 缺失
+            西向 e_x=-1: k=3(W), k=6(NW), k=7(SW) → 右邊界 ig=nx 缺失
+        只在流體節點（mask=0）施加。
+        """
+        for j in range(self.ny):
+            jg = j + 1
+            # 左邊界：補填向東分量（k=1,5,8），來源：右側內部 ig=nx
+            if self.solver.mask[1, jg] == 0:
+                f_dst[1, jg][1] = f_dst[self.nx, jg][1]
+                f_dst[1, jg][5] = f_dst[self.nx, jg][5]
+                f_dst[1, jg][8] = f_dst[self.nx, jg][8]
+            # 右邊界：補填向西分量（k=3,6,7），來源：左側內部 ig=1
+            if self.solver.mask[self.nx, jg] == 0:
+                f_dst[self.nx, jg][3] = f_dst[1, jg][3]
+                f_dst[self.nx, jg][6] = f_dst[1, jg][6]
+                f_dst[self.nx, jg][7] = f_dst[1, jg][7]
+
+    @ti.kernel
+    def _periodic_y(self, f_dst: ti.template()):
+        """
+        Y 方向週期邊界條件（方向選擇性補缺）
+
+        What: 補充上下邊界 push 串流後缺失的方向分量
+        Why:  與 _periodic_x 對稱，處理 Y 方向週期性。
+              Push 串流後：
+              - 底邊界 jg=1 缺少向北分量（k=2,5,6）
+              - 頂邊界 jg=ny 缺少向南分量（k=4,7,8）
+              只補缺失分量，不影響正確分量。
+
+        D2Q9 方向：
+            北向 e_y=+1: k=2(N), k=5(NE), k=6(NW) → 底邊界 jg=1 缺失
+            南向 e_y=-1: k=4(S), k=7(SW), k=8(SE) → 頂邊界 jg=ny 缺失
+        只在流體節點（mask=0）施加。
+        """
+        for i in range(self.nx):
+            ig = i + 1
+            # 底邊界：補填向北分量（k=2,5,6），來源：頂側內部 jg=ny
+            if self.solver.mask[ig, 1] == 0:
+                f_dst[ig, 1][2] = f_dst[ig, self.ny][2]
+                f_dst[ig, 1][5] = f_dst[ig, self.ny][5]
+                f_dst[ig, 1][6] = f_dst[ig, self.ny][6]
+            # 頂邊界：補填向南分量（k=4,7,8），來源：底側內部 jg=1
+            if self.solver.mask[ig, self.ny] == 0:
+                f_dst[ig, self.ny][4] = f_dst[ig, 1][4]
+                f_dst[ig, self.ny][7] = f_dst[ig, 1][7]
+                f_dst[ig, self.ny][8] = f_dst[ig, 1][8]
+
+
+@ti.data_oriented
+class MultiphaseBoundaryConditions:
+    """
+    多相 LBM 邊界條件（雙組分）
+
+    What:
+    - 提供多相版本的速度入口、出口、壁面、週期邊界
+    - 對 fA/fB 同時施加邊界條件
+
+    Why:
+    - 多相 solver 不可直接使用單相 Zou-He
+    - 需要為兩組分佈函數重建邊界
+
+    When:
+    - 多相案例（RT、相分離）需要固定邊界條件
+    """
+
+    def __init__(self, solver):
+        self.solver = solver
+        self.nx = solver.nx
+        self.ny = solver.ny
+
+        self.u_inlet = ti.field(dtype=ti.f32, shape=())
+        self.rho_inlet_a = ti.field(dtype=ti.f32, shape=())
+        self.rho_inlet_b = ti.field(dtype=ti.f32, shape=())
+        self.rho_inlet_a[None] = 0.0
+        self.rho_inlet_b[None] = 0.0
+        self.u_wall_field = ti.field(dtype=ti.f32, shape=self.nx)
+        self.rho_target = ti.field(dtype=ti.f32, shape=())
+        self.rho_target[None] = 1.0
+
+        self.corner_extrapolation_enabled = False
+
+    # ==================== Public API ====================
+
+    def add_velocity_inlet(
+        self,
+        u_in: float,
+        location: str = "left",
+        method: str = "neq",
+        rho_a: float | None = None,
+        rho_b: float | None = None,
+    ):
+        """
+        多相固定速度入口
+
+        Note:
+        - 對組分 A/B 分別重建
+        - 使用 NEQ 或 Zou-He（簡化版）
+        """
+        self.u_inlet[None] = u_in
+        self.rho_inlet_a[None] = 0.0 if rho_a is None else float(rho_a)
+        self.rho_inlet_b[None] = 0.0 if rho_b is None else float(rho_b)
+        if method == "neq":
+            left_kernel = self._velocity_inlet_left_neq
+            right_kernel = self._velocity_inlet_right_neq
+        elif method == "zouhe":
+            left_kernel = self._velocity_inlet_left
+            right_kernel = self._velocity_inlet_right
+        else:
+            raise ValueError(f"Unknown inlet method: {method}")
+
+        if location == "left":
+            self.solver.add_boundary_condition(left_kernel, "MP Velocity Inlet (Left)")
+        elif location == "right":
+            self.solver.add_boundary_condition(right_kernel, "MP Velocity Inlet (Right)")
+        else:
+            raise NotImplementedError(f"Location '{location}' not implemented")
+
+    def add_neumann_outflow(self, location: str = "right"):
+        """多相零梯度出口"""
+        if location == "right":
+            self.solver.add_boundary_condition(
+                self._neumann_outflow_right, "MP Neumann Outflow (Right)"
+            )
+        elif location == "left":
+            self.solver.add_boundary_condition(
+                self._neumann_outflow_left, "MP Neumann Outflow (Left)"
+            )
+        elif location == "top":
+            self.solver.add_boundary_condition(
+                self._neumann_outflow_top, "MP Neumann Outflow (Top)"
+            )
+        elif location == "bottom":
+            self.solver.add_boundary_condition(
+                self._neumann_outflow_bottom, "MP Neumann Outflow (Bottom)"
+            )
+        else:
+            raise ValueError(f"Invalid location: {location}")
+
+    def add_stable_outlet(
+        self,
+        rho_out: float = 1.0,
+        location: str = "right",
+        relaxation: float = 0.02,
+    ):
+        """多相穩定出口（弱鬆弛）"""
+        self.add_orlanski_outflow(
+            location=location,
+            rho_target=rho_out,
+            relaxation=relaxation,
+        )
+
+    def add_orlanski_outflow(
+        self,
+        location: str = "right",
+        rho_target: float = 1.0,
+        relaxation: float = 0.02,
+    ):
+        """
+        多相非反射出口（簡化版）
+
+        Note:
+        - 以零梯度外推 + 弱密度鬆弛近似
+        - 用於多相穩定性，不等同完整 Orlanski
+        """
+        self.rho_target[None] = rho_target
+        if location == "right":
+            self.solver.add_boundary_condition(
+                lambda fA, fB: self._relaxed_outflow_right(fA, fB, relaxation),
+                "MP Orlanski Outflow (Right)",
+            )
+        elif location == "left":
+            self.solver.add_boundary_condition(
+                lambda fA, fB: self._relaxed_outflow_left(fA, fB, relaxation),
+                "MP Orlanski Outflow (Left)",
+            )
+        elif location == "top":
+            self.solver.add_boundary_condition(
+                lambda fA, fB: self._relaxed_outflow_top(fA, fB, relaxation),
+                "MP Orlanski Outflow (Top)",
+            )
+        elif location == "bottom":
+            self.solver.add_boundary_condition(
+                lambda fA, fB: self._relaxed_outflow_bottom(fA, fB, relaxation),
+                "MP Orlanski Outflow (Bottom)",
+            )
+        else:
+            raise ValueError(f"Invalid location: {location}")
+
+    def add_no_slip_wall(self, location: str, exclude_corners: bool = False):
+        """多相 No-Slip 壁面（Bounce-Back）"""
+        # 固壁 -> 啟用濕潤性牆面旗標
+        self.solver.enable_wall_boundary(location, enabled=True)
+        if location == "top":
+            self.solver.add_boundary_condition(
+                self._no_slip_top, "MP No-Slip (Top)"
+            )
+        elif location == "bottom":
+            self.solver.add_boundary_condition(
+                self._no_slip_bottom, "MP No-Slip (Bottom)"
+            )
+        elif location == "left":
+            self.solver.add_boundary_condition(
+                self._no_slip_left, "MP No-Slip (Left)"
+            )
+        elif location == "right":
+            self.solver.add_boundary_condition(
+                self._no_slip_right, "MP No-Slip (Right)"
+            )
+        else:
+            raise ValueError(f"Invalid location: {location}")
+
+    def add_free_slip_wall(self, location: str):
+        """多相 Free-Slip 壁面（鏡面反射）"""
+        if location == "top":
+            self.solver.add_boundary_condition(
+                self._free_slip_top, "MP Free-Slip (Top)"
+            )
+        elif location == "bottom":
+            self.solver.add_boundary_condition(
+                self._free_slip_bottom, "MP Free-Slip (Bottom)"
+            )
+        elif location == "left":
+            self.solver.add_boundary_condition(
+                self._free_slip_left, "MP Free-Slip (Left)"
+            )
+        elif location == "right":
+            self.solver.add_boundary_condition(
+                self._free_slip_right, "MP Free-Slip (Right)"
+            )
+        else:
+            raise ValueError(f"Invalid location: {location}")
+
+    def add_moving_wall(self, velocity_profile: np.ndarray, location: str = "top"):
+        """多相運動壁面（Zou-He）"""
+        if velocity_profile.shape[0] != self.nx:
+            raise ValueError(
+                f"Velocity profile length {velocity_profile.shape[0]} != nx {self.nx}"
+            )
+        self.u_wall_field.from_numpy(velocity_profile.astype(np.float32))
+        self.solver.enable_wall_boundary(location, enabled=True)
+        if location == "top":
+            self.solver.add_boundary_condition(
+                self._moving_wall_top, "MP Moving Wall (Top)"
+            )
+        elif location == "bottom":
+            self.solver.add_boundary_condition(
+                self._moving_wall_bottom, "MP Moving Wall (Bottom)"
+            )
+        else:
+            raise NotImplementedError(
+                f"Location '{location}' not implemented for moving wall"
+            )
+
+    def add_periodic_boundary(self, direction: str):
+        """多相週期邊界（由 solver 控制）"""
+        self.solver.set_periodic(direction, enabled=True)
+
+    def set_wetting(self, g_wall_a: float, g_wall_b: float, psi_wall: float = 1.0):
+        """
+        設定濕潤性參數
+
+        Args:
+            g_wall_a: 組分 A 與壁面交互作用強度
+            g_wall_b: 組分 B 與壁面交互作用強度
+            psi_wall: 壁面 pseudo-potential
+        """
+        self.solver.set_wetting(g_wall_a, g_wall_b, psi_wall)
+
+    def enable_wetting_wall(self, location: str, enabled: bool = True):
+        """
+        啟用/關閉指定邊界的濕潤性牆面旗標
+        """
+        self.solver.enable_wall_boundary(location, enabled=enabled)
+
+    def handle_corners_extrapolation(self):
+        """多相角點外推（平均外推）"""
+        if not self.corner_extrapolation_enabled:
+            self.solver.add_boundary_condition(
+                self._handle_corners_extrapolation_kernel, "MP Corner Extrapolation"
+            )
+            self.corner_extrapolation_enabled = True
+
+    # ==================== Helper Functions ====================
+
+    @ti.func
+    def _compute_equilibrium(self, rho, u):
+        u_sq = u.dot(u)
+        feq = ti.Vector([0.0] * 9)
+        for k in ti.static(range(9)):
+            e_k = ti.cast(self.solver.e[k], ti.f32)
+            eu = e_k.dot(u)
+            feq[k] = (
+                self.solver.w[k]
+                * rho
+                * (1.0 + 3.0 * eu + 4.5 * eu * eu - 1.5 * u_sq)
+            )
+        return feq
+
+    @ti.func
+    def _compute_macro_from_ab(self, fA_cell, fB_cell):
+        rho_a = 0.0
+        rho_b = 0.0
+        momentum = ti.Vector([0.0, 0.0])
+        for k in ti.static(range(9)):
+            rho_a += fA_cell[k]
+            rho_b += fB_cell[k]
+            momentum += (fA_cell[k] + fB_cell[k]) * ti.cast(self.solver.e[k], ti.f32)
+        rho = rho_a + rho_b
+        u = ti.Vector([0.0, 0.0])
+        if rho > 1e-12:
+            u = momentum / rho
+        return rho_a, rho_b, rho, u
+
+    # ==================== Inlet (Zou-He / NEQ) ====================
+
+    @ti.kernel
+    def _velocity_inlet_left(self, fA: ti.template(), fB: ti.template()):
+        for j in range(self.ny):
+            jg = j + 1
+            u_in = self.u_inlet[None]
+
+            # 組分 A
+            f0 = fA[1, jg][0]
+            f2 = fA[1, jg][2]
+            f3 = fA[1, jg][3]
+            f4 = fA[1, jg][4]
+            f6 = fA[1, jg][6]
+            f7 = fA[1, jg][7]
+            rho_a = (f0 + f2 + f4 + 2.0 * (f3 + f6 + f7)) / (1.0 - u_in)
+            fA[1, jg][1] = f3 + (2.0 / 3.0) * rho_a * u_in
+            fA[1, jg][5] = f7 - 0.5 * (f2 - f4) + (1.0 / 6.0) * rho_a * u_in
+            fA[1, jg][8] = f6 + 0.5 * (f2 - f4) + (1.0 / 6.0) * rho_a * u_in
+
+            # 組分 B
+            f0 = fB[1, jg][0]
+            f2 = fB[1, jg][2]
+            f3 = fB[1, jg][3]
+            f4 = fB[1, jg][4]
+            f6 = fB[1, jg][6]
+            f7 = fB[1, jg][7]
+            rho_b = (f0 + f2 + f4 + 2.0 * (f3 + f6 + f7)) / (1.0 - u_in)
+            fB[1, jg][1] = f3 + (2.0 / 3.0) * rho_b * u_in
+            fB[1, jg][5] = f7 - 0.5 * (f2 - f4) + (1.0 / 6.0) * rho_b * u_in
+            fB[1, jg][8] = f6 + 0.5 * (f2 - f4) + (1.0 / 6.0) * rho_b * u_in
+
+    @ti.kernel
+    def _velocity_inlet_right(self, fA: ti.template(), fB: ti.template()):
+        for j in range(self.ny):
+            jg = j + 1
+            u_in = -self.u_inlet[None]
+
+            f0 = fA[self.nx, jg][0]
+            f1 = fA[self.nx, jg][1]
+            f2 = fA[self.nx, jg][2]
+            f4 = fA[self.nx, jg][4]
+            f5 = fA[self.nx, jg][5]
+            f8 = fA[self.nx, jg][8]
+            rho_a = (f0 + f2 + f4 + 2.0 * (f1 + f5 + f8)) / (1.0 + u_in)
+            fA[self.nx, jg][3] = f1 - (2.0 / 3.0) * rho_a * u_in
+            fA[self.nx, jg][7] = f5 + 0.5 * (f2 - f4) - (1.0 / 6.0) * rho_a * u_in
+            fA[self.nx, jg][6] = f8 - 0.5 * (f2 - f4) - (1.0 / 6.0) * rho_a * u_in
+
+            f0 = fB[self.nx, jg][0]
+            f1 = fB[self.nx, jg][1]
+            f2 = fB[self.nx, jg][2]
+            f4 = fB[self.nx, jg][4]
+            f5 = fB[self.nx, jg][5]
+            f8 = fB[self.nx, jg][8]
+            rho_b = (f0 + f2 + f4 + 2.0 * (f1 + f5 + f8)) / (1.0 + u_in)
+            fB[self.nx, jg][3] = f1 - (2.0 / 3.0) * rho_b * u_in
+            fB[self.nx, jg][7] = f5 + 0.5 * (f2 - f4) - (1.0 / 6.0) * rho_b * u_in
+            fB[self.nx, jg][6] = f8 - 0.5 * (f2 - f4) - (1.0 / 6.0) * rho_b * u_in
+
+    @ti.kernel
+    def _velocity_inlet_left_neq(self, fA: ti.template(), fB: ti.template()):
+        for j in range(self.ny):
+            jg = j + 1
+            u_in = self.u_inlet[None]
+            rho_a_i, rho_b_i, _, u_i = self._compute_macro_from_ab(
+                fA[2, jg], fB[2, jg]
+            )
+            u_b = ti.Vector([u_in, 0.0])
+            rho_a = rho_a_i
+            rho_b = rho_b_i
+            if self.rho_inlet_a[None] > 0.0:
+                rho_a = self.rho_inlet_a[None]
+            if self.rho_inlet_b[None] > 0.0:
+                rho_b = self.rho_inlet_b[None]
+
+            feq_a_b = self._compute_equilibrium(rho_a, u_b)
+            feq_a_i = self._compute_equilibrium(rho_a_i, u_i)
+            feq_b_b = self._compute_equilibrium(rho_b, u_b)
+            feq_b_i = self._compute_equilibrium(rho_b_i, u_i)
+
+            for k in ti.static(range(9)):
+                fA[1, jg][k] = feq_a_b[k] + (fA[2, jg][k] - feq_a_i[k])
+                fB[1, jg][k] = feq_b_b[k] + (fB[2, jg][k] - feq_b_i[k])
+
+    @ti.kernel
+    def _velocity_inlet_right_neq(self, fA: ti.template(), fB: ti.template()):
+        for j in range(self.ny):
+            jg = j + 1
+            u_in = -self.u_inlet[None]
+            rho_a_i, rho_b_i, _, u_i = self._compute_macro_from_ab(
+                fA[self.nx - 1, jg], fB[self.nx - 1, jg]
+            )
+            u_b = ti.Vector([u_in, 0.0])
+            rho_a = rho_a_i
+            rho_b = rho_b_i
+            if self.rho_inlet_a[None] > 0.0:
+                rho_a = self.rho_inlet_a[None]
+            if self.rho_inlet_b[None] > 0.0:
+                rho_b = self.rho_inlet_b[None]
+
+            feq_a_b = self._compute_equilibrium(rho_a, u_b)
+            feq_a_i = self._compute_equilibrium(rho_a_i, u_i)
+            feq_b_b = self._compute_equilibrium(rho_b, u_b)
+            feq_b_i = self._compute_equilibrium(rho_b_i, u_i)
+
+            for k in ti.static(range(9)):
+                fA[self.nx, jg][k] = feq_a_b[k] + (
+                    fA[self.nx - 1, jg][k] - feq_a_i[k]
+                )
+                fB[self.nx, jg][k] = feq_b_b[k] + (
+                    fB[self.nx - 1, jg][k] - feq_b_i[k]
+                )
+
+    # ==================== Neumann Outflow ====================
+
+    @ti.kernel
+    def _neumann_outflow_right(self, fA: ti.template(), fB: ti.template()):
+        for j in range(self.ny):
+            jg = j + 1
+            for k in ti.static(range(9)):
+                fA[self.nx, jg][k] = fA[self.nx - 1, jg][k]
+                fB[self.nx, jg][k] = fB[self.nx - 1, jg][k]
+
+    @ti.kernel
+    def _neumann_outflow_left(self, fA: ti.template(), fB: ti.template()):
+        for j in range(self.ny):
+            jg = j + 1
+            for k in ti.static(range(9)):
+                fA[1, jg][k] = fA[2, jg][k]
+                fB[1, jg][k] = fB[2, jg][k]
+
+    @ti.kernel
+    def _neumann_outflow_top(self, fA: ti.template(), fB: ti.template()):
+        for i in range(self.nx):
+            ig = i + 1
+            for k in ti.static(range(9)):
+                fA[ig, self.ny][k] = fA[ig, self.ny - 1][k]
+                fB[ig, self.ny][k] = fB[ig, self.ny - 1][k]
+
+    @ti.kernel
+    def _neumann_outflow_bottom(self, fA: ti.template(), fB: ti.template()):
+        for i in range(self.nx):
+            ig = i + 1
+            for k in ti.static(range(9)):
+                fA[ig, 1][k] = fA[ig, 2][k]
+                fB[ig, 1][k] = fB[ig, 2][k]
+
+    # ==================== Relaxed Outflow ====================
+
+    @ti.kernel
+    def _relaxed_outflow_right(
+        self, fA: ti.template(), fB: ti.template(), relax: ti.f32
+    ):
+        for j in range(self.ny):
+            jg = j + 1
+            for k in ti.static(range(9)):
+                fA[self.nx, jg][k] = fA[self.nx - 1, jg][k]
+                fB[self.nx, jg][k] = fB[self.nx - 1, jg][k]
+
+            rho_a, rho_b, rho, _ = self._compute_macro_from_ab(
+                fA[self.nx, jg], fB[self.nx, jg]
+            )
+            rho_target = (1.0 - relax) * rho + relax * self.rho_target[None]
+            if rho > 1e-12:
+                ratio_a = rho_a / rho
+                ratio_b = rho_b / rho
+                corr_a = (ratio_a * rho_target) / rho_a
+                corr_b = (ratio_b * rho_target) / rho_b
+                for k in ti.static(range(9)):
+                    fA[self.nx, jg][k] *= corr_a
+                    fB[self.nx, jg][k] *= corr_b
+
+    @ti.kernel
+    def _relaxed_outflow_left(
+        self, fA: ti.template(), fB: ti.template(), relax: ti.f32
+    ):
+        for j in range(self.ny):
+            jg = j + 1
+            for k in ti.static(range(9)):
+                fA[1, jg][k] = fA[2, jg][k]
+                fB[1, jg][k] = fB[2, jg][k]
+
+            rho_a, rho_b, rho, _ = self._compute_macro_from_ab(
+                fA[1, jg], fB[1, jg]
+            )
+            rho_target = (1.0 - relax) * rho + relax * self.rho_target[None]
+            if rho > 1e-12:
+                ratio_a = rho_a / rho
+                ratio_b = rho_b / rho
+                corr_a = (ratio_a * rho_target) / rho_a
+                corr_b = (ratio_b * rho_target) / rho_b
+                for k in ti.static(range(9)):
+                    fA[1, jg][k] *= corr_a
+                    fB[1, jg][k] *= corr_b
+
+    @ti.kernel
+    def _relaxed_outflow_top(
+        self, fA: ti.template(), fB: ti.template(), relax: ti.f32
+    ):
+        for i in range(self.nx):
+            ig = i + 1
+            for k in ti.static(range(9)):
+                fA[ig, self.ny][k] = fA[ig, self.ny - 1][k]
+                fB[ig, self.ny][k] = fB[ig, self.ny - 1][k]
+
+            rho_a, rho_b, rho, _ = self._compute_macro_from_ab(
+                fA[ig, self.ny], fB[ig, self.ny]
+            )
+            rho_target = (1.0 - relax) * rho + relax * self.rho_target[None]
+            if rho > 1e-12:
+                ratio_a = rho_a / rho
+                ratio_b = rho_b / rho
+                corr_a = (ratio_a * rho_target) / rho_a
+                corr_b = (ratio_b * rho_target) / rho_b
+                for k in ti.static(range(9)):
+                    fA[ig, self.ny][k] *= corr_a
+                    fB[ig, self.ny][k] *= corr_b
+
+    @ti.kernel
+    def _relaxed_outflow_bottom(
+        self, fA: ti.template(), fB: ti.template(), relax: ti.f32
+    ):
+        for i in range(self.nx):
+            ig = i + 1
+            for k in ti.static(range(9)):
+                fA[ig, 1][k] = fA[ig, 2][k]
+                fB[ig, 1][k] = fB[ig, 2][k]
+
+            rho_a, rho_b, rho, _ = self._compute_macro_from_ab(
+                fA[ig, 1], fB[ig, 1]
+            )
+            rho_target = (1.0 - relax) * rho + relax * self.rho_target[None]
+            if rho > 1e-12:
+                ratio_a = rho_a / rho
+                ratio_b = rho_b / rho
+                corr_a = (ratio_a * rho_target) / rho_a
+                corr_b = (ratio_b * rho_target) / rho_b
+                for k in ti.static(range(9)):
+                    fA[ig, 1][k] *= corr_a
+                    fB[ig, 1][k] *= corr_b
+
+    # ==================== Free-Slip ====================
+
+    @ti.kernel
+    def _free_slip_top(self, fA: ti.template(), fB: ti.template()):
+        j = self.ny
+        for i in range(self.nx):
+            ig = i + 1
+            fA[ig, j][2] = fA[ig, j][4]
+            fA[ig, j][5] = fA[ig, j][8]
+            fA[ig, j][6] = fA[ig, j][7]
+
+            fB[ig, j][2] = fB[ig, j][4]
+            fB[ig, j][5] = fB[ig, j][8]
+            fB[ig, j][6] = fB[ig, j][7]
+
+    @ti.kernel
+    def _free_slip_bottom(self, fA: ti.template(), fB: ti.template()):
+        j = 1
+        for i in range(self.nx):
+            ig = i + 1
+            fA[ig, j][4] = fA[ig, j][2]
+            fA[ig, j][7] = fA[ig, j][6]
+            fA[ig, j][8] = fA[ig, j][5]
+
+            fB[ig, j][4] = fB[ig, j][2]
+            fB[ig, j][7] = fB[ig, j][6]
+            fB[ig, j][8] = fB[ig, j][5]
+
+    @ti.kernel
+    def _free_slip_left(self, fA: ti.template(), fB: ti.template()):
+        i = 1
+        for j in range(self.ny):
+            jg = j + 1
+            fA[i, jg][3] = fA[i, jg][1]
+            fA[i, jg][6] = fA[i, jg][5]
+            fA[i, jg][7] = fA[i, jg][8]
+
+            fB[i, jg][3] = fB[i, jg][1]
+            fB[i, jg][6] = fB[i, jg][5]
+            fB[i, jg][7] = fB[i, jg][8]
+
+    @ti.kernel
+    def _free_slip_right(self, fA: ti.template(), fB: ti.template()):
+        i = self.nx
+        for j in range(self.ny):
+            jg = j + 1
+            fA[i, jg][1] = fA[i, jg][3]
+            fA[i, jg][5] = fA[i, jg][6]
+            fA[i, jg][8] = fA[i, jg][7]
+
+            fB[i, jg][1] = fB[i, jg][3]
+            fB[i, jg][5] = fB[i, jg][6]
+            fB[i, jg][8] = fB[i, jg][7]
+
+    # ==================== No-Slip (Bounce-Back) ====================
+
+    @ti.kernel
+    def _no_slip_top(self, fA: ti.template(), fB: ti.template()):
+        j = self.ny
+        for i in range(self.nx):
+            ig = i + 1
+            fA[ig, j][2] = fA[ig, j][4]
+            fA[ig, j][5] = fA[ig, j][7]
+            fA[ig, j][6] = fA[ig, j][8]
+
+            fB[ig, j][2] = fB[ig, j][4]
+            fB[ig, j][5] = fB[ig, j][7]
+            fB[ig, j][6] = fB[ig, j][8]
+
+    @ti.kernel
+    def _no_slip_bottom(self, fA: ti.template(), fB: ti.template()):
+        j = 1
+        for i in range(self.nx):
+            ig = i + 1
+            fA[ig, j][4] = fA[ig, j][2]
+            fA[ig, j][7] = fA[ig, j][5]
+            fA[ig, j][8] = fA[ig, j][6]
+
+            fB[ig, j][4] = fB[ig, j][2]
+            fB[ig, j][7] = fB[ig, j][5]
+            fB[ig, j][8] = fB[ig, j][6]
+
+    @ti.kernel
+    def _no_slip_left(self, fA: ti.template(), fB: ti.template()):
+        i = 1
+        for j in range(self.ny):
+            jg = j + 1
+            fA[i, jg][3] = fA[i, jg][1]
+            fA[i, jg][6] = fA[i, jg][8]
+            fA[i, jg][7] = fA[i, jg][5]
+
+            fB[i, jg][3] = fB[i, jg][1]
+            fB[i, jg][6] = fB[i, jg][8]
+            fB[i, jg][7] = fB[i, jg][5]
+
+    @ti.kernel
+    def _no_slip_right(self, fA: ti.template(), fB: ti.template()):
+        i = self.nx
+        for j in range(self.ny):
+            jg = j + 1
+            fA[i, jg][1] = fA[i, jg][3]
+            fA[i, jg][5] = fA[i, jg][7]
+            fA[i, jg][8] = fA[i, jg][6]
+
+            fB[i, jg][1] = fB[i, jg][3]
+            fB[i, jg][5] = fB[i, jg][7]
+            fB[i, jg][8] = fB[i, jg][6]
+
+    # ==================== Moving Wall ====================
+
+    @ti.kernel
+    def _moving_wall_top(self, fA: ti.template(), fB: ti.template()):
+        jg = self.ny
+        for i in range(1, self.nx - 1):
+            ig = i + 1
+            u_wall = self.u_wall_field[i]
+
+            # 組分 A
+            f0 = fA[ig, jg][0]
+            f1 = fA[ig, jg][1]
+            f2 = fA[ig, jg][2]
+            f3 = fA[ig, jg][3]
+            f5 = fA[ig, jg][5]
+            f6 = fA[ig, jg][6]
+            rho_a = f0 + f1 + f3 + 2.0 * (f2 + f5 + f6)
+            fA[ig, jg][4] = f2
+            fA[ig, jg][7] = f5 - (1.0 / 6.0) * rho_a * u_wall + 0.5 * (f1 - f3)
+            fA[ig, jg][8] = f6 + (1.0 / 6.0) * rho_a * u_wall - 0.5 * (f1 - f3)
+
+            # 組分 B
+            f0 = fB[ig, jg][0]
+            f1 = fB[ig, jg][1]
+            f2 = fB[ig, jg][2]
+            f3 = fB[ig, jg][3]
+            f5 = fB[ig, jg][5]
+            f6 = fB[ig, jg][6]
+            rho_b = f0 + f1 + f3 + 2.0 * (f2 + f5 + f6)
+            fB[ig, jg][4] = f2
+            fB[ig, jg][7] = f5 - (1.0 / 6.0) * rho_b * u_wall + 0.5 * (f1 - f3)
+            fB[ig, jg][8] = f6 + (1.0 / 6.0) * rho_b * u_wall - 0.5 * (f1 - f3)
+
+    @ti.kernel
+    def _moving_wall_bottom(self, fA: ti.template(), fB: ti.template()):
+        jg = 1
+        for i in range(1, self.nx - 1):
+            ig = i + 1
+            u_wall = self.u_wall_field[i]
+
+            f0 = fA[ig, jg][0]
+            f1 = fA[ig, jg][1]
+            f3 = fA[ig, jg][3]
+            f4 = fA[ig, jg][4]
+            f7 = fA[ig, jg][7]
+            f8 = fA[ig, jg][8]
+            rho_a = f0 + f1 + f3 + 2.0 * (f4 + f7 + f8)
+            fA[ig, jg][2] = f4
+            fA[ig, jg][5] = f7 + (1.0 / 6.0) * rho_a * u_wall + 0.5 * (f1 - f3)
+            fA[ig, jg][6] = f8 - (1.0 / 6.0) * rho_a * u_wall - 0.5 * (f1 - f3)
+
+            f0 = fB[ig, jg][0]
+            f1 = fB[ig, jg][1]
+            f3 = fB[ig, jg][3]
+            f4 = fB[ig, jg][4]
+            f7 = fB[ig, jg][7]
+            f8 = fB[ig, jg][8]
+            rho_b = f0 + f1 + f3 + 2.0 * (f4 + f7 + f8)
+            fB[ig, jg][2] = f4
+            fB[ig, jg][5] = f7 + (1.0 / 6.0) * rho_b * u_wall + 0.5 * (f1 - f3)
+            fB[ig, jg][6] = f8 - (1.0 / 6.0) * rho_b * u_wall - 0.5 * (f1 - f3)
+
+    # ==================== Corner Extrapolation ====================
+
+    @ti.kernel
+    def _handle_corners_extrapolation_kernel(self, fA: ti.template(), fB: ti.template()):
+        for k in ti.static(range(9)):
+            # 左下角
+            fA[1, 1][k] = 0.5 * (fA[2, 1][k] + fA[1, 2][k])
+            fB[1, 1][k] = 0.5 * (fB[2, 1][k] + fB[1, 2][k])
+
+            # 右下角
+            fA[self.nx, 1][k] = 0.5 * (
+                fA[self.nx - 1, 1][k] + fA[self.nx, 2][k]
+            )
+            fB[self.nx, 1][k] = 0.5 * (
+                fB[self.nx - 1, 1][k] + fB[self.nx, 2][k]
+            )
+
+            # 左上角
+            fA[1, self.ny][k] = 0.5 * (
+                fA[2, self.ny][k] + fA[1, self.ny - 1][k]
+            )
+            fB[1, self.ny][k] = 0.5 * (
+                fB[2, self.ny][k] + fB[1, self.ny - 1][k]
+            )
+
+            # 右上角
+            fA[self.nx, self.ny][k] = 0.5 * (
+                fA[self.nx - 1, self.ny][k] + fA[self.nx, self.ny - 1][k]
+            )
+            fB[self.nx, self.ny][k] = 0.5 * (
+                fB[self.nx - 1, self.ny][k] + fB[self.nx, self.ny - 1][k]
+            )
 
     # ==================== Periodic Boundary Conditions ====================
 

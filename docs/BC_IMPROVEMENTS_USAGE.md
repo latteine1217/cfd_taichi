@@ -7,9 +7,11 @@
 
 ---
 
+> **注意**：Neumann outflow 已從案例/CLI 移除，一般外流請使用 **Orlanski**。
+
 ## 📋 修正內容總覽
 
-### 🔴 Critical Issue 1: Neumann Outflow 質量修正
+### 🔴 Legacy Issue: Neumann Outflow 質量修正（deprecated）
 
 **問題**：純零梯度外推不保證質量守恆，長時間模擬累積誤差 ±0.5-1%
 
@@ -22,11 +24,11 @@ from core import BoundaryConditions
 
 bc = BoundaryConditions(solver)
 
-# ✅ 新版（推薦）：自動質量修正
-bc.add_neumann_outflow(location='right', mass_corrected=True)
+# ✅ Deprecated 使用：僅供內部測試
+bc.add_orlanski_outflow(location='right')
 
 # ⚠️ 舊版（僅用於對比）：純零梯度
-bc.add_neumann_outflow(location='right', mass_corrected=False)
+bc.add_orlanski_outflow(location='right')
 ```
 
 **效果**：
@@ -156,11 +158,11 @@ from core import LBMSolver, BoundaryConditions
 solver = LBMSolver(nx=nx, ny=ny, re=100.0, u_ref=0.1)
 bc = BoundaryConditions(solver)
 
-# 使用無局部修正的 Neumann BC
+# 使用無局部修正的 Neumann BC（deprecated 測試/對照）
 bc.add_velocity_inlet(0.1, 'left')
-bc.add_neumann_outflow('right', mass_corrected=False)  # 無局部修正
-bc.add_neumann_outflow('top', mass_corrected=False)
-bc.add_neumann_outflow('bottom', mass_corrected=False)
+bc.add_orlanski_outflow('right')
+bc.add_free_slip_wall('top')
+bc.add_free_slip_wall('bottom')
 
 # 主迴圈
 for step in range(1, steps+1):
@@ -216,8 +218,8 @@ solver.set_obstacle(mask)
 bc = BoundaryConditions(solver)
 bc.add_velocity_inlet(u_in, location='left')
 bc.add_orlanski_outflow(location='right')
-bc.add_neumann_outflow('top', mass_corrected=True)    # ✅ 改進版
-bc.add_neumann_outflow('bottom', mass_corrected=True) # ✅ 改進版
+bc.add_free_slip_wall('top')
+bc.add_free_slip_wall('bottom')
 
 # 初始化
 solver.reset()
@@ -258,8 +260,8 @@ solver.set_obstacle(mask)
 bc = BoundaryConditions(solver)
 bc.add_velocity_inlet(u_in, location='left')
 bc.add_orlanski_outflow(location='right')
-bc.add_neumann_outflow('top', mass_corrected=True)    # ✅ 改進版
-bc.add_neumann_outflow('bottom', mass_corrected=True) # ✅ 改進版
+bc.add_free_slip_wall('top')
+bc.add_free_slip_wall('bottom')
 
 # 初始化與主迴圈...
 ```
@@ -353,7 +355,7 @@ python tests/test_bc_improvements.py --test 4  # 全局質量修正
 
 | 測試 | 指標 | 舊版 | 新版 | 改進 |
 |-----|------|------|------|------|
-| **1. Neumann 質量** | 質量誤差（50k 步） | ±0.5-1% | < 0.01% | ✅ 50-100× |
+| **1. Neumann 質量（deprecated）** | 質量誤差（50k 步） | ±0.5-1% | < 0.01% | ✅ 50-100× |
 | **2. 角點處理** | 中心渦流位置偏差 | ~5% | < 1% | ✅ 5× |
 | **3. Sponge Layer** | Re=5000 穩定性 | 可能發散 | 穩定收斂 | ✅ 穩定 |
 | **4. 全局質量修正** | 質量誤差（50k 步） | ±0.5-1% | < 0.01% | ✅ 50-100× |
@@ -364,7 +366,7 @@ python tests/test_bc_improvements.py --test 4  # 全局質量修正
 
 | 改進 | 計算成本增加 | 記憶體增加 | 建議使用頻率 |
 |-----|-------------|-----------|------------|
-| **Neumann 質量修正** | < 1% | 0% | 總是使用 |
+| **Neumann 質量修正（deprecated）** | < 1% | 0% | 內部測試用途 |
 | **角點外推** | < 0.1% | 0% | 小計算域使用 |
 | **Sponge Layer** | ~2-3% | 0% | Re > 5000 使用 |
 | **全局質量修正** | < 0.5% | 0% | 每 100 步 |
@@ -375,7 +377,7 @@ python tests/test_bc_improvements.py --test 4  # 全局質量修正
 
 ## ⚠️ 注意事項
 
-### 1. **Neumann BC 質量修正**
+### 1. **Neumann BC 質量修正（deprecated）**
 - ✅ 默認啟用（`mass_corrected=True`）
 - ⚠️ 如需對比舊版行為，設為 `False`
 - ❌ 不要與全局質量修正同時使用（會重複修正）
@@ -399,7 +401,7 @@ python tests/test_bc_improvements.py --test 4  # 全局質量修正
 
 ## 🎓 物理原理總結
 
-### **Neumann BC 質量修正**
+### **Neumann BC 質量修正（deprecated）**
 - **問題**：零梯度 ∂f/∂n = 0 不等價於 ∑f_i = ρ_target
 - **解決**：f_i *= ρ_target / ρ_current（等比例縮放）
 - **物理**：只調整壓力，速度方向不變
@@ -432,7 +434,7 @@ python tests/test_bc_improvements.py --test 4  # 全局質量修正
 
 ## ✅ Checklist：升級現有代碼
 
-- [ ] 將 `bc.add_neumann_outflow()` 改為 `bc.add_neumann_outflow(mass_corrected=True)`
+- [ ] 將出口改為 `bc.add_orlanski_outflow()`
 - [ ] 小計算域 Cavity：加入 `bc.handle_corners_extrapolation()`
 - [ ] Re > 5000：啟用 `enable_sponge=True`
 - [ ] 長時間模擬：考慮每 100 步調用 `solver.apply_global_mass_correction()`

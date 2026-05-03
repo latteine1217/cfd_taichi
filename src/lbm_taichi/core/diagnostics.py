@@ -10,7 +10,40 @@ import taichi as ti
 import numpy as np
 import os
 import time
-from tabulate import tabulate
+from cfd_taichi.output_schema import build_history_payload, build_state_payload
+try:
+    from tabulate import tabulate  # type: ignore
+except ModuleNotFoundError:
+    def tabulate(rows, headers=None, tablefmt=None):
+        """Minimal GitHub-style table fallback (no external dependency)."""
+        headers = headers or []
+        rows = rows or []
+        str_rows = [[str(c) for c in row] for row in rows]
+        str_headers = [str(h) for h in headers]
+        cols = len(str_headers) if str_headers else (len(str_rows[0]) if str_rows else 0)
+        if cols == 0:
+            return ""
+
+        def _col_width(c):
+            max_row = max((len(r[c]) for r in str_rows), default=0)
+            return max(len(str_headers[c]) if str_headers else 0, max_row)
+
+        widths = [_col_width(c) for c in range(cols)]
+
+        def _fmt_row(items):
+            return "| " + " | ".join(
+                items[c].ljust(widths[c]) for c in range(cols)
+            ) + " |"
+
+        lines = []
+        if str_headers:
+            lines.append(_fmt_row(str_headers))
+            lines.append("| " + " | ".join("-" * widths[c] for c in range(cols)) + " |")
+        for row in str_rows:
+            if len(row) < cols:
+                row = row + [""] * (cols - len(row))
+            lines.append(_fmt_row(row))
+        return "\n".join(lines)
 from typing import Optional, Dict, List, Tuple
 from lbm_taichi.utils.vtk_io import write_vti
 
@@ -30,6 +63,7 @@ class Diagnostics:
         self._headers = []
         self.output_vtk = output_vtk
         self.force_history: List[Tuple[int, float, float]] = []
+        self._history_samples: List[Dict[str, float]] = []
 
     @ti.kernel
     def compute_forces(self, f_field: ti.template()):
@@ -316,6 +350,19 @@ class Diagnostics:
                 eta_str,
             ]
 
+        sample = {
+            "step": float(step),
+            "mass_error": float(mass_err),
+            "mom_res_x": float(res["R_u"]),
+            "mom_res_y": float(res["R_v"]),
+            "u_max": float(umax),
+            "cfl": float(cfl),
+        }
+        if include_forces:
+            sample["cd"] = float(cd)
+            sample["cl"] = float(cl)
+        self._history_samples.append(sample)
+
         # 核心優化：使用 tabulate 的格式化邏輯來生成「單行」表格字串
         # 透過與表頭共享相同的 headers，確保每一列都完美對齊
         row_str = tabulate([row], headers=self._headers, tablefmt="github").split("\n")[
@@ -374,7 +421,7 @@ class Diagnostics:
         print("\n" + "=" * 60)
         print(f"{'Physics Validation (with Energy Monitoring)':^60}")
         print("-" * 60)
-        print(f"Mass Error       : {mass_err:.2e} ({'✅' if mass_err < 1e-4 else '⚠️'})")
+        print(f"Mass Error       : {mass_err:.2e} ({'✅' if mass_err < 1e-6 else '⚠️'})")
         print(
             f"Max CFL (U)      : {diag['max_u']:.4f} ({'✅' if diag['max_u'] < 0.3 else '❌'})"
         )
@@ -407,28 +454,67 @@ class Diagnostics:
         - 記憶體節省：~90%
         """
         fields = self.solver.get_fields()
-        data = {
-            "rho": fields["rho"],
-            "u": fields["u"],
-            "mask": fields["mask"],
-            "step": step,
-        }
+        extra = dict(additional_data or {})
 
         # 收集粒子數據（緊湊格式）
         if hasattr(self.solver, "p_active"):
             # 只導出活躍粒子（GPU→CPU 傳輸優化）
             active = self.solver.p_active.to_numpy() == 1
             px, py = self.solver.px.to_numpy(), self.solver.py.to_numpy()
-            data["particles"] = np.stack([px[active], py[active]], axis=1)
-            data["particle_count"] = np.sum(active)  # 統計資訊
+            extra["particles"] = np.stack([px[active], py[active]], axis=1)
+            extra["particle_count"] = np.sum(active)  # 統計資訊
 
-        if additional_data:
-            data.update(additional_data)
+        data = build_state_payload(
+            solver=self.solver,
+            fields=fields,
+            step=step,
+            time_value=extra.pop("time", float(step)),
+            additional_data=extra,
+        )
         np.save(os.path.join(self.output_dir, f"state_{step:06d}.npy"), data)
 
         if self.output_vtk:
             vtk_path = os.path.join(self.output_dir, f"state_{step:06d}.vti")
             write_vti(vtk_path, data["rho"], data["u"], data.get("mask"))
+
+    def save_history(
+        self,
+        params: Optional[Dict] = None,
+        filename: str = "history.npy",
+        additional_payload: Optional[Dict] = None,
+    ) -> str:
+        """
+        儲存統一 history payload。
+
+        What:
+        - 固定輸出跨 solver 共用的 history schema
+        - 同時保留既有 `headers/data` 相容欄位
+
+        Why:
+        - 案例不應各自手刻 `history.npy` 格式
+        """
+        steps = [int(sample["step"]) for sample in self._history_samples]
+        payload = build_history_payload(
+            solver=self.solver,
+            steps=steps,
+            mass_error=[sample["mass_error"] for sample in self._history_samples],
+            mom_res_x=[sample["mom_res_x"] for sample in self._history_samples],
+            mom_res_y=[sample["mom_res_y"] for sample in self._history_samples],
+            u_max=[sample["u_max"] for sample in self._history_samples],
+            cfl=[sample["cfl"] for sample in self._history_samples],
+            params=params,
+            legacy_headers=self._headers,
+            legacy_rows=self.history,
+            extra_series={
+                "cd": [sample.get("cd", np.nan) for sample in self._history_samples],
+                "cl": [sample.get("cl", np.nan) for sample in self._history_samples],
+            },
+        )
+        if additional_payload:
+            payload.update(dict(additional_payload))
+        history_path = os.path.join(self.output_dir, filename)
+        np.save(history_path, payload, allow_pickle=True)
+        return history_path
 
     def check_convergence(self, tol: float = 1e-5) -> bool:
         res = self.get_residuals()

@@ -9,6 +9,7 @@
 
 - ❌ **錯誤理解**：「Free-Slip 是開放邊界」
 - ✅ **正確理解**：「Free-Slip 是無摩擦的固體壁面」
+- ✅ **補充**：Neumann outflow 已從案例/CLI 移除，開放空域請使用 **Orlanski**。
 
 ---
 
@@ -42,31 +43,33 @@
 
 ---
 
-### **Neumann Outflow（零梯度開放邊界）**
+### **Orlanski Outflow（非反射開放邊界）**
 
 **物理模型**：
 ```
   ↑↓ ↑↓ ↑↓ ↑↓ ↑↓ ↑↓ ↑↓ ↑↓  ← 開放邊界（流體可自由進出）
 │                             │
-│         ═══►               │   ∂u/∂n = 0
-│                             │   ∂v/∂n = 0
+│         ═══►               │   ∂/∂t + c ∂/∂n = 0
+│                             │
   ↑↓ ↑↓ ↑↓ ↑↓ ↑↓ ↑↓ ↑↓ ↑↓  ← 開放邊界（流體可自由進出）
 ```
 
 **數學條件**：
-- 零梯度外推：∂u/∂n = 0, ∂v/∂n = 0, ∂ρ/∂n = 0
+- Orlanski 對流外推：∂/∂t + c ∂/∂n = 0
 - 法向速度**不為零**（可以流動）
-- **這是開放邊界！**
+- **開放邊界，且抑制反射波**
 
 **適用場景**：
 - ✅ 真實飛行條件（開放空域）
 - ✅ 無限大計算域的近似
-- ✅ 最小化邊界影響
+- ✅ 最小化邊界反射
 
 **優點**：
-- ✅ 允許流體從側邊自由流動
-- ✅ 不限制流場發展
+- ✅ 允許流體自由進出
+- ✅ 抑制反射波與回流干擾
 - ✅ 更接近真實物理
+
+**備註**：Neumann outflow 已從案例/CLI 移除。
 
 ---
 
@@ -122,11 +125,9 @@ python examples/flow_over_cylinder.py --sidewall freeslip
 ### **機翼（Airfoil）**
 
 ```bash
-# 默認配置（推薦）：開放空域（真實飛行）
-python examples/airfoil.py --sidewall outflow
-
-# 風洞實驗對比：
-python examples/airfoil.py --sidewall freeslip
+# 相關 airfoil example 已移除；若要比較 sidewall 策略，請改用現存案例
+python examples/flow_over_cylinder.py --sidewall outflow
+python examples/flow_over_cylinder.py --sidewall freeslip
 ```
 
 **推薦**：`--sidewall outflow`
@@ -181,8 +182,8 @@ bc.add_free_slip_wall('bottom')
 
 ```python
 # ✅ 正確
-bc.add_neumann_outflow('top')
-bc.add_neumann_outflow('bottom')
+bc.add_free_slip_wall('top')
+bc.add_free_slip_wall('bottom')
 # → 模擬無限大域
 ```
 
@@ -195,7 +196,7 @@ bc.add_neumann_outflow('bottom')
 ❌ 錯誤理解：Free-Slip = 自由邊界
 ✅ 正確理解：Free-Slip = 無摩擦固體壁面
 
-空中飛行 → 開放空域 → Neumann Outflow
+空中飛行 → 開放空域 → Orlanski Outflow
 ```
 
 ---
@@ -299,16 +300,10 @@ python compare_boundaries.py \
 
 ```bash
 # === 推薦配置（開放空域）===
-python examples/flow_over_cylinder.py --sidewall outflow --outflow pressure
-python examples/airfoil.py --sidewall outflow --outflow pressure
+python examples/flow_over_cylinder.py --sidewall outflow --outflow orlanski
 
 # === 風洞實驗配置 ===
-python examples/flow_over_cylinder.py --sidewall freeslip --outflow pressure
-python examples/airfoil.py --sidewall freeslip --outflow pressure
-
-# === 實驗性配置（全 Neumann）===
-python examples/flow_over_cylinder.py --sidewall outflow --outflow neumann
-python examples/airfoil.py --sidewall outflow --outflow neumann
+python examples/flow_over_cylinder.py --sidewall freeslip --outflow orlanski
 ```
 
 ---

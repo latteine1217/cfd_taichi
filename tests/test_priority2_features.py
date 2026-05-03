@@ -16,11 +16,19 @@ import taichi as ti
 import numpy as np
 import argparse
 import os
-import sys
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from lbm_taichi.core import LBMSolver, BoundaryConditions
+
+
+def _init_taichi_for_test():
+    """
+    初始化 Taichi 測試 runtime。
+
+    Why:
+    - 這個測試模組可被 pytest 直接呼叫，不應依賴 `main()` 才完成 `ti.init()`
+    """
+    ti.reset()
+    ti.init(arch=ti.cpu, default_fp=ti.f32)
 
 
 def test_periodic_bc_taylor_green(
@@ -50,6 +58,7 @@ def test_periodic_bc_taylor_green(
     print("\n" + "=" * 60)
     print("測試 1: Taylor-Green Vortex（週期邊界）")
     print("=" * 60)
+    _init_taichi_for_test()
 
     nx, ny = res, res
     solver = LBMSolver(nx=nx, ny=ny, re=re, u_ref=0.1)
@@ -75,7 +84,7 @@ def test_periodic_bc_taylor_green(
             solver.rho[i + 1, j + 1] = 1.0
 
     # 從速度場重建分佈函數
-    solver._init_from_macro()
+    solver._refresh_equilibrium_from_macro()
     solver.apply_boundary_conditions(solver.f)
     solver.apply_boundary_conditions(solver.f_new)
 
@@ -176,6 +185,7 @@ def test_reflection_suppression(
     print("\n" + "=" * 60)
     print("測試 2: Zou-He 反射波抑制（圓柱繞流）")
     print("=" * 60)
+    _init_taichi_for_test()
 
     from lbm_taichi.utils.geometry import create_circle_mask
 
@@ -199,8 +209,8 @@ def test_reflection_suppression(
             rho_target=1.0,
             relaxation=relaxation,
         )
-        bc.add_free_slip_wall("top", mode="symmetric")
-        bc.add_free_slip_wall("bottom", mode="symmetric")
+        bc.add_free_slip_wall("top")
+        bc.add_free_slip_wall("bottom")
 
         # 初始化
         solver.reset()
@@ -305,6 +315,7 @@ def test_periodic_channel_flow(
     print("\n" + "=" * 60)
     print("測試 3: 週期性通道流")
     print("=" * 60)
+    _init_taichi_for_test()
 
     nx, ny = int(4 * res), res
     solver = LBMSolver(nx=nx, ny=ny, re=re, u_ref=0.1)
@@ -321,7 +332,7 @@ def test_periodic_channel_flow(
             solver.u[i + 1, j + 1] = [0.1, 0.0]
             solver.rho[i + 1, j + 1] = 1.0
 
-    solver._init_from_macro()
+    solver._refresh_equilibrium_from_macro()
     solver.apply_boundary_conditions(solver.f)
     solver.apply_boundary_conditions(solver.f_new)
 

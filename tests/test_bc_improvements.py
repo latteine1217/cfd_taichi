@@ -1,32 +1,27 @@
 """
-邊界條件改進驗證測試
-===================
+邊界條件改進手動驗證腳本
+========================
 
-測試 Critical Issues 修正：
+這些函數是長時間積分（50,000 步）的手動驗證腳本，不是 pytest 單元測試。
+請直接以 `python tests/test_bc_improvements.py` 執行，並在執行前確保已呼叫 ti.init()。
+
+驗證 Critical Issues 修正：
 1. Neumann Outflow 質量修正
 2. 角點外推處理
 3. Sponge Layer 穩定性
 4. 全局質量修正
 
-測試方法：
-- 長時間模擬（50,000 步）
-- 監控質量守恆誤差
-- 對比修正前後差異
+注意：函數以 run_* 命名（非 test_*），避免 pytest 自動收集這些長時間腳本。
 """
 
 import taichi as ti
 import numpy as np
 import argparse
-import os
-import sys
-
-# 添加父目錄到路徑
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from lbm_taichi.core import LBMSolver, BoundaryConditions
 
 
-def test_neumann_mass_conservation(
+def run_neumann_mass_conservation(
     steps: int = 50000, res: int = 128, output_dir: str = "test_output_neumann"
 ):
     """
@@ -110,7 +105,7 @@ def test_neumann_mass_conservation(
     print("\n✅ 測試 1 完成！結果保存至", output_dir)
 
 
-def test_corner_handling(
+def run_corner_handling(
     res: int = 64, steps: int = 10000, output_dir: str = "test_output_corner"
 ):
     """
@@ -186,7 +181,7 @@ def test_corner_handling(
     print("\n✅ 測試 2 完成！結果保存至", output_dir)
 
 
-def test_sponge_layer(
+def run_sponge_layer(
     res: int = 128,
     re: float = 5000,
     steps: int = 20000,
@@ -235,8 +230,8 @@ def test_sponge_layer(
         bc = BoundaryConditions(solver)
         bc.add_velocity_inlet(0.08, location="left")
         bc.add_orlanski_outflow(location="right", rho_target=1.0)
-        bc.add_free_slip_wall("top", mode="symmetric")
-        bc.add_free_slip_wall("bottom", mode="symmetric")
+        bc.add_free_slip_wall("top")
+        bc.add_free_slip_wall("bottom")
 
         # 初始化
         solver.reset()
@@ -285,7 +280,7 @@ def test_sponge_layer(
     print("\n✅ 測試 3 完成！結果保存至", output_dir)
 
 
-def test_global_mass_correction(
+def run_global_mass_correction(
     steps: int = 50000, res: int = 128, output_dir: str = "test_output_global_mass"
 ):
     """
@@ -394,16 +389,16 @@ def main():
     print("=" * 60)
 
     if args.test in ["all", "1"]:
-        test_neumann_mass_conservation(steps=args.steps, res=args.res)
+        run_neumann_mass_conservation(steps=args.steps, res=args.res)
 
     if args.test in ["all", "2"]:
-        test_corner_handling(res=64, steps=10000)
+        run_corner_handling(res=64, steps=10000)
 
     if args.test in ["all", "3"]:
-        test_sponge_layer(res=args.res, re=5000, steps=20000)
+        run_sponge_layer(res=args.res, re=5000, steps=20000)
 
     if args.test in ["all", "4"]:
-        test_global_mass_correction(steps=args.steps, res=args.res)
+        run_global_mass_correction(steps=args.steps, res=args.res)
 
     print("\n" + "=" * 60)
     print("✅ 所有測試完成！")

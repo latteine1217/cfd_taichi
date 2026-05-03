@@ -19,15 +19,28 @@ CFD Taichi - 統一 LBM 核心模組
 """
 
 from .lbm_solver import LBMSolver
+from .multiphase_solver import MultiphaseLBMSolver
+from .boundary_conditions import MultiphaseBoundaryConditions
+from .multiphase_diagnostics import MultiphaseDiagnostics
+from .ch_lbm_solver import CHLBMSolver
+from .ch_diagnostics import CHDiagnostics
 from .boundary_conditions import BoundaryConditions
 from .collision_models import CollisionModels
 from .diagnostics import Diagnostics
+from .thermal_module import ThermalModule, ThermalBoundaryConditions
 
 __all__ = [
-    'LBMSolver',
-    'BoundaryConditions',
-    'CollisionModels',
-    'Diagnostics',
+    "LBMSolver",
+    "BoundaryConditions",
+    "CollisionModels",
+    "Diagnostics",
+    "MultiphaseLBMSolver",
+    "MultiphaseBoundaryConditions",
+    "MultiphaseDiagnostics",
+    "CHLBMSolver",
+    "CHDiagnostics",
+    "ThermalModule",
+    "ThermalBoundaryConditions",
 ]
 
 __version__ = '2.0.0'

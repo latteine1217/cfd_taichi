@@ -144,14 +144,14 @@ nu_sgs = (tau_eff - tau) / 3
 
 **使用範例**:
 ```bash
-python src/lbm_taichi/utils/visualization.py output_airfoil --type eddy_viscosity --gif
+python src/lbm_taichi/utils/visualization.py output_flow_over_cylinder --type eddy_viscosity --gif
 ```
 
 ---
 
 ### 6. 實作機翼勢流初始化
 **優先級**: 🟡 中
-**檔案**: `src/lbm_taichi/core/lbm_solver.py`, `examples/airfoil.py`
+**檔案**: `src/lbm_taichi/core/lbm_solver.py`, `examples/airfoil.py`（historical, removed）
 
 **改進內容**:
 - 考慮攻角與環量的勢流疊加
@@ -205,17 +205,18 @@ python src/lbm_taichi/utils/visualization.py output_airfoil --type eddy_viscosit
 
 ---
 
-### 8. MRT 鬆弛率與 τ_eff 一致性
+### 8. MRT 鬆弛率與 τ_eff 一致性（修正版）
 **優先級**: 🟡 中
 **檔案**: `src/lbm_taichi/core/lbm_solver.py`
 
 **改進內容**:
-- 對能量與 q 模式的鬆弛率依 `tau_eff` 做等比縮放
-- 保持 LES 增黏時各矩模式耗散一致
+- ✅ 只對黏性相關模式（應力張量 k=7,8）使用 `tau_eff`
+- ✅ 非黏度模式（能量、q 模式）維持固定鬆弛率（Lallemand & Luo 建議值）
+- ✅ 避免 LES 渦黏度影響非物理模式的耗散
 
 **效果**:
-- ✅ 改善高 Re LES 的耗散一致性
-- ✅ 降低「只調剪應變」造成的偏穩問題
+- ✅ 更符合 MRT 理論：渦黏度僅影響剪應變
+- ✅ 降低高 Re 下的非物理能量堆積風險
 
 ---
 
@@ -265,16 +266,9 @@ python examples/flow_over_cylinder.py --res 128 --re 150 --steps 10000
 - ✅ Mass error < 1e-4
 - ✅ Energy dissipation 2-5%
 
-### 測試 2: 機翼 (Re=1000, AoA=10°)
-```bash
-python examples/airfoil.py --res 256 --re 1000 --aoa 10 --steps 5000
-```
+### 測試 2: 歷史機翼案例
 
-**預期結果**:
-- ✅ 初始 Cl ≈ 1.09 (2π sin 10° ≈ 1.09)
-- ✅ 收斂步數 < 2500
-- ✅ nu_sgs 在前緣最大
-- ✅ 自由流 nu_sgs < 1e-5
+`examples/airfoil.py` 已自 repo 移除。若需驗證渦黏度場，請改用現存案例例如 `flow_over_cylinder.py`。
 
 ### 測試 3: CFL 違規檢測
 ```python
@@ -322,7 +316,7 @@ examples/flow_over_cylinder.py
 ├── check_cfl_condition()             [整合] P0 - CFL 檢查
 └── solver.initial_KE[None]           [整合] P1 - 能量初始化
 
-examples/airfoil.py
+examples/airfoil.py   [historical, removed]
 ├── init_potential_flow_airfoil()     [整合] P1 - 機翼勢流
 └── solver.initial_KE[None]           [整合] P1 - 能量初始化
 ```

@@ -13,12 +13,21 @@ archieved/
 __pycache__/
 .venv/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .ipynb_checkpoints/
 *.pyc
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
 
 # 系統檔案
 .DS_Store
 Thumbs.db
+imgui.ini
 
 # 編輯器與 Agent 設定
 .vscode/
@@ -28,3 +37,12 @@ Thumbs.db
 AGENTS.md
 CLAUDE.md
 GEMINI.md
+
+# Git worktrees
+.worktrees/
+
+# 本機旁支工作區 / 外部子專案
+ocean-physics/
+
+# 臨時驗證腳本
+test_validation_quick.py

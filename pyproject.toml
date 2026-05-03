@@ -1,7 +1,11 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "cfd-taichi"
-version = "0.1.0"
-description = "CFD solvers using Taichi"
+version = "0.2.0"
+description = "Benchmark-first CFD solver toolkit using Taichi"
 requires-python = ">=3.10"
 dependencies = [
     "taichi==1.7.4",
@@ -9,4 +13,21 @@ dependencies = [
     "matplotlib",
     "imageio",
     "tabulate",
+    "scipy>=1.15.3",
 ]
+
+[project.scripts]
+cfd-taichi = "cfd_taichi.cli:main"
+
+[tool.setuptools]
+packages = [
+    "cfd_taichi",
+    "fvm_taichi",
+    "fvm_taichi.compressible",
+    "fvm_taichi.incompressible",
+    "lbm_taichi",
+    "lbm_taichi.core",
+    "lbm_taichi.utils",
+    "examples",
+]
+package-dir = {"" = "src", "examples" = "examples"}
