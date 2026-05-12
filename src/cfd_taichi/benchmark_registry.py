@@ -22,10 +22,12 @@ from typing import Any, Callable
 
 from examples.cd_nozzle_euler import build_cd_nozzle_runner
 from examples.couette_flow_ns import build_couette_runner
+from examples.flow_over_cylinder import build_flow_over_cylinder_runner
 from examples.lid_driven_cavity import build_lid_driven_cavity_runner
 from examples.naca0012_euler import build_naca0012_euler_runner
 from examples.naca0012_ns import build_naca0012_ns_runner
 from examples.poiseuille_flow_ns import build_poiseuille_runner
+from examples.rayleigh_benard import build_rayleigh_benard_runner
 from examples.transonic_bump_euler import build_transonic_bump_runner
 
 from .case_runner import CaseRunner
@@ -161,6 +163,96 @@ def _register_builtin_benchmarks():
                     metric="max_u",
                     min_value=1e-6,
                     description="上蓋驅動至少應產生非零速度場。",
+                ),
+            ),
+        )
+    )
+    register_benchmark(
+        BenchmarkSpec(
+            name="flow_over_cylinder",
+            builder=build_flow_over_cylinder_runner,
+            description="LBM bluff-body cylinder benchmark with inlet, outlet, sidewall, and force diagnostics.",
+            tags=("lbm", "single_phase", "bluff_body", "cylinder", "verification"),
+            aliases=("cylinder",),
+            default_params={
+                "res_y": 96,
+                "re": 150.0,
+                "u_in": 0.1,
+                "diameter": None,
+                "cs": 0.16,
+                "sidewall": "orlanski",
+                "outflow_type": "orlanski",
+                "outlet_relaxation": 0.02,
+                "collision_model": "mrt",
+            },
+            acceptance_criteria=(
+                BenchmarkAcceptanceCriterion(
+                    name="history-sampled",
+                    metric="history_samples",
+                    min_value=1.0,
+                    description="Cylinder regression 至少應留下 1 筆 history sample。",
+                ),
+                BenchmarkAcceptanceCriterion(
+                    name="obstacle-present",
+                    metric="obstacle_cells",
+                    min_value=1.0,
+                    description="圓柱 benchmark 必須包含非零固體障礙物區域。",
+                ),
+                BenchmarkAcceptanceCriterion(
+                    name="flow-active",
+                    metric="u_max",
+                    min_value=1e-6,
+                    description="入口驅動後應維持非零速度尺度。",
+                ),
+                BenchmarkAcceptanceCriterion(
+                    name="drag-diagnostic-available",
+                    metric="drag_coefficient_abs",
+                    min_value=0.0,
+                    description="圓柱繞流應能輸出阻力診斷。",
+                ),
+            ),
+        )
+    )
+    register_benchmark(
+        BenchmarkSpec(
+            name="rayleigh_benard",
+            builder=build_rayleigh_benard_runner,
+            description="Closed-cavity Rayleigh-Benard thermal LBM benchmark with DDF+Boussinesq coupling.",
+            tags=("lbm", "thermal", "boussinesq", "natural_convection", "verification"),
+            aliases=("rb", "rayleigh-benard"),
+            default_params={
+                "ny": 64,
+                "Ra": 1e5,
+                "Pr": 0.71,
+                "u_ref": 0.1,
+                "aspect": 2.0,
+                "perturbation": 0.01,
+                "collision_model": "mrt",
+            },
+            acceptance_criteria=(
+                BenchmarkAcceptanceCriterion(
+                    name="history-sampled",
+                    metric="history_samples",
+                    min_value=1.0,
+                    description="Rayleigh-Benard regression 至少應留下 1 筆 history sample。",
+                ),
+                BenchmarkAcceptanceCriterion(
+                    name="nusselt-positive",
+                    metric="nusselt",
+                    min_value=0.0,
+                    description="熱壁面 Nusselt 診斷必須為有限非負值。",
+                ),
+                BenchmarkAcceptanceCriterion(
+                    name="temperature-bounded-low",
+                    metric="temperature_min",
+                    min_value=-0.25,
+                    description="短步數 thermal smoke 不應產生大幅負溫度 undershoot。",
+                ),
+                BenchmarkAcceptanceCriterion(
+                    name="temperature-bounded-high",
+                    metric="temperature_max",
+                    max_value=1.25,
+                    description="短步數 thermal smoke 不應產生大幅溫度 overshoot。",
                 ),
             ),
         )

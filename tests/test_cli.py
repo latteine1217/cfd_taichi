@@ -32,6 +32,7 @@ def test_cli_benchmark_list_prints_registry(tmp_path, capsys, monkeypatch):
 
     assert "=== Benchmark Index ===" in out
     assert "name: lid_driven_cavity" in out
+    assert "name: flow_over_cylinder" in out
     assert "name: cd_nozzle_euler" in out
     assert "name: naca0012_euler" in out
     assert "name: naca0012_ns" in out
@@ -45,7 +46,7 @@ def test_cli_benchmark_list_prints_registry(tmp_path, capsys, monkeypatch):
     assert "history-sampled[metric=history_samples;" in out
     assert "=== Payload File ===" in out
     assert payload["schema_name"] == "benchmark_index"
-    assert payload["count"] >= 7
+    assert payload["count"] >= 8
     assert "name" in payload["field_order"].tolist()
     assert "default_params" in payload["field_order"].tolist()
     assert "naca0012_euler" in payload["name"].tolist()
@@ -53,6 +54,7 @@ def test_cli_benchmark_list_prints_registry(tmp_path, capsys, monkeypatch):
     assert "poiseuille_flow_ns" in payload["name"].tolist()
     assert "couette_flow_ns" in payload["name"].tolist()
     assert "cd_nozzle_euler" in payload["name"].tolist()
+    assert "flow_over_cylinder" in payload["name"].tolist()
 
 
 def test_cli_benchmark_run_executes_registry_runner(tmp_path, capsys, monkeypatch):

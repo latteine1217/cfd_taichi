@@ -339,6 +339,41 @@ def test_benchmark_registry_builds_cd_nozzle_runner():
     assert runner.grid.solver_size_kwargs("fvm") == {"ni": 40, "nj": 12}
 
 
+def test_benchmark_registry_builds_flow_over_cylinder_runner():
+    spec = get_benchmark_spec("cylinder")
+    runner = create_benchmark_runner("cylinder", res_y=24, re=100.0, u_in=0.05, cs=-1.0)
+
+    assert spec.name == "flow_over_cylinder"
+    assert "cylinder" in spec.tags
+    assert len(spec.acceptance_criteria) >= 1
+    assert runner.name == "flow_over_cylinder"
+    assert runner.method == "lbm"
+    assert runner.equation == "single_phase"
+    assert runner.regime == "low_mach"
+    assert runner.grid.solver_size_kwargs("lbm") == {"nx": 60, "ny": 24}
+
+
+def test_benchmark_registry_builds_rayleigh_benard_runner():
+    spec = get_benchmark_spec("rayleigh_benard")
+    runner = create_benchmark_runner(
+        "rb",
+        ny=12,
+        Ra=1e4,
+        Pr=0.71,
+        u_ref=0.05,
+        aspect=1.0,
+    )
+
+    assert spec.name == "rayleigh_benard"
+    assert "thermal" in spec.tags
+    assert len(spec.acceptance_criteria) >= 1
+    assert runner.name == "rayleigh_benard"
+    assert runner.method == "lbm"
+    assert runner.equation == "thermal_boussinesq"
+    assert runner.regime == "low_mach"
+    assert runner.grid.solver_size_kwargs("lbm") == {"nx": 12, "ny": 12}
+
+
 def test_benchmark_registry_builds_naca0012_euler_runner():
     spec = get_benchmark_spec("naca_euler")
     runner = create_benchmark_runner("naca_euler", ni=40, nj=16, ma=0.3, aoa=5.0)
@@ -489,6 +524,16 @@ def test_benchmark_matrix_runs_lbm_and_fvm_entries(tmp_path):
                 history_params={"case": "nozzle-matrix"},
             ),
             BenchmarkMatrixEntry(
+                benchmark="flow_over_cylinder",
+                steps=2,
+                sample_interval=1,
+                output_dir=tmp_path,
+                save_state=True,
+                save_history=True,
+                overrides={"res_y": 24, "re": 100.0, "u_in": 0.05, "cs": -1.0},
+                history_params={"case": "cylinder-matrix"},
+            ),
+            BenchmarkMatrixEntry(
                 benchmark="naca0012_euler",
                 steps=1,
                 sample_interval=1,
@@ -542,7 +587,7 @@ def test_benchmark_matrix_runs_lbm_and_fvm_entries(tmp_path):
     summary = build_benchmark_matrix_payload(results)
     summary_path = save_benchmark_matrix_payload(tmp_path / "matrix_summary.npy", results)
 
-    assert len(results) == 7
+    assert len(results) == 8
     assert results[0].benchmark == "lid_driven_cavity"
     assert results[0].solver_family == "lbm"
     assert results[0].history_samples >= 2
@@ -568,42 +613,52 @@ def test_benchmark_matrix_runs_lbm_and_fvm_entries(tmp_path):
     assert (tmp_path / "cd_nozzle_euler" / "state_final.npy").exists()
     assert (tmp_path / "cd_nozzle_euler" / "history.npy").exists()
 
-    assert results[3].benchmark == "naca0012_euler"
-    assert results[3].solver_family == "fvm"
-    assert results[3].equation_set == "euler"
-    assert results[3].regime == "compressible"
+    assert results[3].benchmark == "flow_over_cylinder"
+    assert results[3].solver_family == "lbm"
+    assert results[3].equation_set == "navier_stokes"
+    assert results[3].regime == "low_mach"
     assert results[3].acceptance_passed is True
-    assert np.isfinite(results[3].diagnostics["lift_coefficient"])
+    assert results[3].diagnostics["obstacle_cells"] >= 1.0
     assert np.isfinite(results[3].diagnostics["drag_coefficient"])
-    assert (tmp_path / "naca0012_euler" / "state_final.npy").exists()
-    assert (tmp_path / "naca0012_euler" / "history.npy").exists()
+    assert (tmp_path / "flow_over_cylinder" / "state_final.npy").exists()
+    assert (tmp_path / "flow_over_cylinder" / "history.npy").exists()
 
-    assert results[4].benchmark == "naca0012_ns"
+    assert results[4].benchmark == "naca0012_euler"
     assert results[4].solver_family == "fvm"
-    assert results[4].equation_set == "navier_stokes"
+    assert results[4].equation_set == "euler"
     assert results[4].regime == "compressible"
     assert results[4].acceptance_passed is True
     assert np.isfinite(results[4].diagnostics["lift_coefficient"])
     assert np.isfinite(results[4].diagnostics["drag_coefficient"])
-    assert results[4].diagnostics["y_plus_max"] >= 0.0
+    assert (tmp_path / "naca0012_euler" / "state_final.npy").exists()
+    assert (tmp_path / "naca0012_euler" / "history.npy").exists()
+
+    assert results[5].benchmark == "naca0012_ns"
+    assert results[5].solver_family == "fvm"
+    assert results[5].equation_set == "navier_stokes"
+    assert results[5].regime == "compressible"
+    assert results[5].acceptance_passed is True
+    assert np.isfinite(results[5].diagnostics["lift_coefficient"])
+    assert np.isfinite(results[5].diagnostics["drag_coefficient"])
+    assert results[5].diagnostics["y_plus_max"] >= 0.0
     assert (tmp_path / "naca0012_ns" / "state_final.npy").exists()
     assert (tmp_path / "naca0012_ns" / "history.npy").exists()
 
-    assert results[5].benchmark == "poiseuille_flow_ns"
-    assert results[5].solver_family == "fvm"
-    assert results[5].equation_set == "navier_stokes"
-    assert results[5].regime == "incompressible"
-    assert results[5].acceptance_passed is True
-    assert results[5].diagnostics["l2_profile_error"] < 1e-3
-    assert (tmp_path / "poiseuille_flow_ns" / "state_final.npy").exists()
-    assert (tmp_path / "poiseuille_flow_ns" / "history.npy").exists()
-
-    assert results[6].benchmark == "couette_flow_ns"
+    assert results[6].benchmark == "poiseuille_flow_ns"
     assert results[6].solver_family == "fvm"
     assert results[6].equation_set == "navier_stokes"
     assert results[6].regime == "incompressible"
     assert results[6].acceptance_passed is True
-    assert results[6].diagnostics["l2_profile_error"] < 1e-5
+    assert results[6].diagnostics["l2_profile_error"] < 1e-3
+    assert (tmp_path / "poiseuille_flow_ns" / "state_final.npy").exists()
+    assert (tmp_path / "poiseuille_flow_ns" / "history.npy").exists()
+
+    assert results[7].benchmark == "couette_flow_ns"
+    assert results[7].solver_family == "fvm"
+    assert results[7].equation_set == "navier_stokes"
+    assert results[7].regime == "incompressible"
+    assert results[7].acceptance_passed is True
+    assert results[7].diagnostics["l2_profile_error"] < 1e-5
     assert (tmp_path / "couette_flow_ns" / "state_final.npy").exists()
     assert (tmp_path / "couette_flow_ns" / "history.npy").exists()
 
@@ -611,26 +666,98 @@ def test_benchmark_matrix_runs_lbm_and_fvm_entries(tmp_path):
         "lid_driven_cavity",
         "transonic_bump_euler",
         "cd_nozzle_euler",
+        "flow_over_cylinder",
         "naca0012_euler",
         "naca0012_ns",
         "poiseuille_flow_ns",
         "couette_flow_ns",
     ]
-    assert summary["steps"].tolist() == [2, 1, 1, 1, 1, 2, 2]
-    assert summary["acceptance_passed"].tolist() == [True, True, True, True, True, True, True]
-    assert summary["acceptance_failed_count"].tolist() == [0, 0, 0, 0, 0, 0, 0]
+    assert summary["steps"].tolist() == [2, 1, 1, 2, 1, 1, 2, 2]
+    assert summary["acceptance_passed"].tolist() == [True, True, True, True, True, True, True, True]
+    assert summary["acceptance_failed_count"].tolist() == [0, 0, 0, 0, 0, 0, 0, 0]
     assert summary["history_samples"].tolist()[0] >= 2
     assert summary["nozzle_acceleration_ratio"][2] >= 1.0
     assert summary["mdot_balance"][2] <= 2e-1
-    assert summary["mach_max"][3] > 0.0
-    assert np.isfinite(summary["mach_max"][3])
-    assert np.isfinite(summary["drag_coefficient"][4])
-    assert summary["drag_coefficient_abs"][4] >= 0.0
-    assert summary["l2_profile_error"][5] < 1e-3
-    assert summary["div_linf"][5] <= 1e-5
-    assert summary["l2_profile_error"][6] < 1e-5
+    assert summary["obstacle_cells"][3] >= 1.0
+    assert np.isfinite(summary["drag_coefficient"][3])
+    assert summary["mach_max"][4] > 0.0
+    assert np.isfinite(summary["mach_max"][4])
+    assert np.isfinite(summary["drag_coefficient"][5])
+    assert summary["drag_coefficient_abs"][5] >= 0.0
+    assert summary["l2_profile_error"][6] < 1e-3
     assert summary["div_linf"][6] <= 1e-5
+    assert summary["l2_profile_error"][7] < 1e-5
+    assert summary["div_linf"][7] <= 1e-5
     assert summary_path.exists()
+
+
+def test_benchmark_matrix_runs_rayleigh_benard_entry(tmp_path):
+    ti.init(arch=ti.cpu, default_fp=ti.f32)
+
+    results = run_benchmark_matrix(
+        [
+            BenchmarkMatrixEntry(
+                benchmark="rayleigh_benard",
+                steps=1,
+                sample_interval=1,
+                output_dir=tmp_path,
+                save_state=True,
+                save_history=True,
+                overrides={
+                    "ny": 8,
+                    "Ra": 1e4,
+                    "Pr": 0.71,
+                    "u_ref": 0.05,
+                    "aspect": 1.0,
+                },
+                history_params={"case": "rb-matrix"},
+            ),
+        ]
+    )
+
+    result = results[0]
+    state = np.load(tmp_path / "rayleigh_benard" / "state_final.npy", allow_pickle=True).item()
+    history = np.load(tmp_path / "rayleigh_benard" / "history.npy", allow_pickle=True).item()
+
+    assert result.benchmark == "rayleigh_benard"
+    assert result.solver_family == "lbm"
+    assert result.equation_set == "navier_stokes"
+    assert result.acceptance_passed is True
+    assert result.diagnostics["nusselt"] >= 0.0
+    assert np.isfinite(result.diagnostics["temperature_mid"])
+    assert state["temperature"].shape == (8, 8)
+    assert state["Ra"] == 1e4
+    assert history["nusselt"].shape == (1,)
+
+
+def test_rayleigh_benard_stepper_uses_active_temperature_for_buoyancy():
+    ti.init(arch=ti.cpu, default_fp=ti.f32)
+    from examples.rayleigh_benard import build_rayleigh_benard_runner
+
+    runner, _setup = build_rayleigh_benard_runner(
+        ny=8,
+        Ra=1e4,
+        Pr=0.71,
+        u_ref=0.05,
+        aspect=1.0,
+        perturbation=0.0,
+    )
+    solver = runner.build_solver()
+    runner.configure()
+    runner.initialize()
+
+    thermal = runner.thermal
+    thermal._fill_equilibrium(0.5)
+    g_np = thermal.g.to_numpy()
+    w_np = thermal.w.to_numpy()
+    for k in range(9):
+        g_np[:, :, k] = w_np[k] * 1.0
+    thermal.g.from_numpy(g_np)
+
+    runner.step_once()
+
+    force_y = solver.force_field.to_numpy()[1:solver.nx + 1, 1:solver.ny + 1, 1]
+    assert float(np.min(force_y)) > 0.0
 
 
 def test_benchmark_matrix_can_continue_after_failure():

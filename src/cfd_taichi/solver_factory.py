@@ -52,7 +52,14 @@ def create_solver(
     regime_key = _normalize(regime)
 
     if method_key == "lbm":
-        if equation_key in (None, "single_phase", "single-phase", "navier_stokes"):
+        if equation_key in (
+            None,
+            "single_phase",
+            "single-phase",
+            "navier_stokes",
+            "thermal_boussinesq",
+            "thermal-boussinesq",
+        ):
             return LBMSolver(**kwargs)
         if equation_key in ("multiphase", "multi_phase", "two_phase", "two-phase"):
             return MultiphaseLBMSolver(**kwargs)

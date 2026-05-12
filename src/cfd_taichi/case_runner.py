@@ -34,8 +34,10 @@ from .output_schema import build_history_payload, build_state_payload
 from .solver_factory import create_solver
 
 InitializerFn = Callable[["CaseRunner", Any, Any], None]
+StepperFn = Callable[["CaseRunner", int], Any]
 PostStepFn = Callable[["CaseRunner", int, Any], None]
 DiagnosticsHookFn = Callable[["CaseRunner", Any, dict[str, Any]], Mapping[str, Any] | None]
+StateHookFn = Callable[["CaseRunner", Any, dict[str, Any]], Mapping[str, Any] | None]
 
 
 class CaseRunner:
@@ -61,7 +63,9 @@ class CaseRunner:
         boundary_conditions: Sequence[BoundaryConditionDescriptor] | None = None,
         solver_controls: Sequence[SolverControlDescriptor] | None = None,
         initializer: InitializerFn | None = None,
+        stepper: StepperFn | None = None,
         diagnostics_hook: DiagnosticsHookFn | None = None,
+        state_hook: StateHookFn | None = None,
     ):
         self.name = str(name)
         self.method = str(method)
@@ -72,7 +76,9 @@ class CaseRunner:
         self.boundary_conditions = list(boundary_conditions or [])
         self.solver_controls = list(solver_controls or [])
         self.initializer = initializer
+        self.stepper = stepper
         self.diagnostics_hook = diagnostics_hook
+        self.state_hook = state_hook
 
         self.solver: Any | None = None
         self.boundary_handle: Any | None = None
@@ -180,6 +186,14 @@ class CaseRunner:
         - 這些派生量不該硬塞進 solver 本體，而應由 workflow 層提供可插拔擴充點
         """
         merged = dict(diagnostics or {})
+        total_mass = merged.get("total_mass")
+        initial_mass = merged.get("initial_mass")
+        if total_mass is not None and initial_mass is not None and "mass_error" not in merged:
+            merged["mass_error"] = float(
+                abs(total_mass - initial_mass) / (abs(initial_mass) + 1e-12)
+            )
+        if "max_u" in merged and "u_max" not in merged:
+            merged["u_max"] = float(merged["max_u"])
         if self.diagnostics_hook is None:
             return merged
         extra = self.diagnostics_hook(self, self.solver, merged)
@@ -204,9 +218,12 @@ class CaseRunner:
 
         next_step = self.current_step + 1
         if getattr(self.solver, "solver_family", None) == "lbm":
-            f_src = self.solver.f if next_step % 2 == 1 else self.solver.f_new
-            f_dst = self.solver.f_new if next_step % 2 == 1 else self.solver.f
-            result = self.solver.step(f_src, f_dst)
+            if self.stepper is not None:
+                result = self.stepper(self, next_step)
+            else:
+                f_src = self.solver.f if next_step % 2 == 1 else self.solver.f_new
+                f_dst = self.solver.f_new if next_step % 2 == 1 else self.solver.f
+                result = self.solver.step(f_src, f_dst)
         else:
             result = self.solver.step()
 
@@ -244,12 +261,17 @@ class CaseRunner:
             raise RuntimeError("Solver is not built. Call build_solver() first.")
         if getattr(self.solver, "solver_family", None) == "lbm":
             self.prepare_observables(reset_baseline=False)
+        extra_state = dict(additional_data or {})
+        if self.state_hook is not None:
+            hook_data = self.state_hook(self, self.solver, extra_state)
+            if hook_data:
+                extra_state.update(dict(hook_data))
         payload = build_state_payload(
             solver=self.solver,
             fields=self.solver.get_fields(),
             step=self.current_step if step is None else int(step),
             time_value=self.current_time if time_value is None else time_value,
-            additional_data=additional_data,
+            additional_data=extra_state or None,
         )
         return payload
 
@@ -430,6 +452,14 @@ class CaseRunner:
             sample["mom_res_x"] = float(diagnostics["mom_res_x"])
         if "mom_res_y" in diagnostics:
             sample["mom_res_y"] = float(diagnostics["mom_res_y"])
+
+        for key, value in diagnostics.items():
+            if key in sample:
+                continue
+            if isinstance(value, (str, bytes)):
+                continue
+            if np.isscalar(value):
+                sample[key] = float(value)
 
         if extra:
             sample.update(dict(extra))

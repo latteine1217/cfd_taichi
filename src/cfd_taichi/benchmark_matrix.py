@@ -345,8 +345,10 @@ def build_benchmark_matrix_payload(
     payload["mdot_balance"] = _diag_series("mdot_balance", default=np.nan)
     payload["nozzle_acceleration_ratio"] = _diag_series("nozzle_acceleration_ratio", default=np.nan)
     payload["lift_coefficient"] = _diag_series("lift_coefficient", default=np.nan)
+    payload["lift_coefficient_abs"] = _diag_series("lift_coefficient_abs", default=np.nan)
     payload["drag_coefficient"] = _diag_series("drag_coefficient", default=np.nan)
     payload["drag_coefficient_abs"] = _diag_series("drag_coefficient_abs", default=np.nan)
+    payload["obstacle_cells"] = _diag_series("obstacle_cells", default=np.nan)
     payload["acceptance_failed_count"] = np.asarray(
         [
             int(sum(0 if detail.get("passed") else 1 for detail in item.acceptance_details))
