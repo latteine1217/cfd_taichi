@@ -28,8 +28,244 @@ import numpy as np
 import argparse
 import time
 
+from cfd_taichi import (
+    BoundaryConditionDescriptor,
+    CaseRunner,
+    LatticeGrid2D,
+)
 from lbm_taichi.core import LBMSolver, BoundaryConditions, Diagnostics
 from lbm_taichi.utils.geometry import create_circle_mask_and_sdf
+
+
+def _cylinder_force_coefficients_numpy(
+    runner: CaseRunner,
+    solver: LBMSolver,
+    *,
+    diameter: float,
+) -> tuple[float, float]:
+    """
+    計算圓柱 benchmark 的動量交換力係數。
+
+    What:
+    - 以目前 active LBM 分佈函數與固體 mask 估算 Cd / Cl
+
+    Why:
+    - registry diagnostics hook 不應建立完整 `Diagnostics` 輸出管理器
+    - benchmark acceptance 需要力係數可觀測量，而不是只看速度場是否非零
+    """
+    f_field = runner.active_distribution_field()
+    if f_field is None:
+        f_field = solver.f
+    f_np = f_field.to_numpy()
+    mask = solver.mask.to_numpy()
+    e = solver.e.to_numpy()
+    inv = solver.inv.to_numpy()
+
+    force_x = 0.0
+    force_y = 0.0
+    for i in range(solver.nx):
+        for j in range(solver.ny):
+            ig = i + 1
+            jg = j + 1
+            if mask[ig, jg] != 0:
+                continue
+            for k in range(9):
+                ni = i + int(e[k, 0])
+                nj = j + int(e[k, 1])
+                if 0 <= ni < solver.nx and 0 <= nj < solver.ny:
+                    if mask[ni + 1, nj + 1] == 1:
+                        bounced = float(f_np[ig, jg, int(inv[k])])
+                        force_x += 2.0 * bounced * float(e[k, 0])
+                        force_y += 2.0 * bounced * float(e[k, 1])
+
+    denom = 0.5 * solver.u_ref**2 * diameter
+    return force_x / (denom + 1e-12), force_y / (denom + 1e-12)
+
+
+def _initialize_cylinder_case(
+    runner: CaseRunner,
+    solver: LBMSolver,
+    _bc_handle,
+    *,
+    cx: float,
+    cy: float,
+    radius: float,
+    mask: np.ndarray,
+    sdf: np.ndarray,
+    re: float,
+):
+    """
+    圓柱繞流 CaseRunner 初始化流程。
+
+    What:
+    - 設定圓柱障礙物、勢流初始場與初始邊界條件
+
+    Why:
+    - registry 建出的 runner 必須能自洽完成幾何與流場初始化
+    - standalone driver 與 benchmark workflow 應共用同一套物理初始化假設
+    """
+    solver.initialize_obstacle(mask, sdf_array=sdf)
+    solver.init_potential_flow_cylinder(cx=cx, cy=cy, radius=radius)
+    solver.set_wall_function(enabled=re > 1000.0, yplus_min=5.0)
+    solver.apply_boundary_conditions(solver.f)
+    solver.apply_boundary_conditions(solver.f_new)
+    runner.prepare_observables(reset_baseline=True)
+
+
+def _cylinder_diagnostics_hook(
+    runner: CaseRunner,
+    solver: LBMSolver,
+    diagnostics: dict,
+    *,
+    diameter: float,
+    obstacle_area: int,
+    sidewall: str,
+    outflow_type: str,
+) -> dict:
+    """
+    派生 cylinder benchmark 專屬 diagnostics。
+
+    Why:
+    - 圓柱繞流的可觀測量至少應包含 obstacle 幾何、Cd/Cl 與尾流活性
+    """
+    cd, cl = _cylinder_force_coefficients_numpy(runner, solver, diameter=diameter)
+    u_max = float(diagnostics.get("u_max", diagnostics.get("max_u", np.nan)))
+    return {
+        "u_max": u_max,
+        "drag_coefficient": float(cd),
+        "drag_coefficient_abs": float(abs(cd)),
+        "lift_coefficient": float(cl),
+        "lift_coefficient_abs": float(abs(cl)),
+        "obstacle_cells": float(obstacle_area),
+        "diameter": float(diameter),
+        "sidewall": sidewall,
+        "outflow_type": outflow_type,
+    }
+
+
+def build_flow_over_cylinder_runner(
+    *,
+    res_y: int = 128,
+    re: float = 150.0,
+    u_in: float = 0.1,
+    diameter: float | None = None,
+    cs: float = 0.16,
+    sidewall: str = "orlanski",
+    outflow_type: str = "orlanski",
+    outlet_relaxation: float = 0.02,
+    collision_model: str = "mrt",
+) -> tuple[CaseRunner, dict]:
+    """
+    建立圓柱繞流的 CaseRunner。
+
+    What:
+    - 將 LBM solver、圓柱幾何、入口/出口/側壁 BC 與 diagnostics hook 集中成正式 builder
+
+    Why:
+    - Flow-over-cylinder 是 LBM bluff-body 主線，應進入 registry / matrix workflow
+    """
+    if res_y <= 0:
+        raise ValueError(f"res_y must be positive, got {res_y}")
+    if re <= 0.0:
+        raise ValueError(f"re must be positive, got {re}")
+    if u_in <= 0.0:
+        raise ValueError(f"u_in must be positive, got {u_in}")
+    if sidewall not in {"orlanski", "freeslip"}:
+        raise ValueError(f"sidewall must be 'orlanski' or 'freeslip', got {sidewall}")
+    if outflow_type != "orlanski":
+        raise ValueError("Only Orlanski outflow is supported in the toolkit runner.")
+
+    nx = int(2.5 * res_y)
+    ny = int(res_y)
+    diameter_eff = float(res_y / 9.0 if diameter is None else diameter)
+    radius = diameter_eff / 2.0
+    cx = nx / 4.0
+    cy = ny / 2.0
+    auto_les = re > 2000.0
+    cs_eff = cs if cs > 0.0 else (0.16 if auto_les else cs)
+    mask, sdf = create_circle_mask_and_sdf(nx, ny, center=(cx, cy), radius=radius)
+
+    boundary_conditions = [
+        BoundaryConditionDescriptor.velocity_inlet(
+            "left",
+            u_in=u_in,
+            epsilon=0.02,
+            strouhal=0.2,
+            asymmetry=0.03,
+        ),
+        BoundaryConditionDescriptor.stable_outlet(
+            "right",
+            rho_out=1.0,
+            relaxation=outlet_relaxation,
+        ),
+    ]
+    if sidewall == "orlanski":
+        boundary_conditions.extend(
+            [
+                BoundaryConditionDescriptor.orlanski_outflow(
+                    "top",
+                    relaxation=outlet_relaxation,
+                ),
+                BoundaryConditionDescriptor.orlanski_outflow(
+                    "bottom",
+                    relaxation=outlet_relaxation,
+                ),
+            ]
+        )
+    else:
+        boundary_conditions.extend(
+            [
+                BoundaryConditionDescriptor.free_slip("top"),
+                BoundaryConditionDescriptor.free_slip("bottom"),
+            ]
+        )
+
+    runner = CaseRunner(
+        name="flow_over_cylinder",
+        method="lbm",
+        equation="single_phase",
+        regime="low_mach",
+        grid=LatticeGrid2D(nx=nx, ny=ny),
+        solver_kwargs={
+            "re": re,
+            "u_ref": u_in,
+            "length_scale": diameter_eff,
+            "cs": cs_eff,
+            "collision_model": collision_model,
+        },
+        boundary_conditions=boundary_conditions,
+        initializer=lambda runner_obj, solver_obj, bc_handle: _initialize_cylinder_case(
+            runner_obj,
+            solver_obj,
+            bc_handle,
+            cx=cx,
+            cy=cy,
+            radius=radius,
+            mask=mask,
+            sdf=sdf,
+            re=re,
+        ),
+        diagnostics_hook=lambda runner_obj, solver_obj, diagnostics: _cylinder_diagnostics_hook(
+            runner_obj,
+            solver_obj,
+            diagnostics,
+            diameter=diameter_eff,
+            obstacle_area=int(np.count_nonzero(mask)),
+            sidewall=sidewall,
+            outflow_type=outflow_type,
+        ),
+    )
+    setup = {
+        "nx": nx,
+        "ny": ny,
+        "diameter": diameter_eff,
+        "radius": radius,
+        "cx": cx,
+        "cy": cy,
+        "cs_eff": cs_eff,
+        "obstacle_cells": int(np.count_nonzero(mask)),
+    }
+    return runner, setup
 
 
 def run_flow_over_cylinder(

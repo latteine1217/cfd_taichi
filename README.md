@@ -62,6 +62,7 @@ uv sync
 uv run cfd-taichi benchmark list --payload-file benchmark_index.npy
 uv run cfd-taichi benchmark poiseuille --arch cpu --steps 10 --sample-interval 5 --set ni=64 --set nj=32 --payload-file poiseuille_summary.npy
 uv run cfd-taichi benchmark couette --arch cpu --steps 10 --sample-interval 5 --set ni=64 --set nj=32 --payload-file couette_summary.npy
+uv run cfd-taichi benchmark cylinder --arch cpu --steps 10 --sample-interval 5 --set res_y=48 --set re=100.0 --set u_in=0.05 --payload-file cylinder_summary.npy
 uv run cfd-taichi benchmark cd_nozzle --arch cpu --steps 10 --sample-interval 5 --set ni=40 --set nj=16 --payload-file cd_nozzle_summary.npy
 uv run cfd-taichi benchmark naca_euler --arch cpu --steps 10 --sample-interval 5 --set ni=80 --set nj=24 --set ma=0.3 --set aoa=5.0 --payload-file naca_euler_summary.npy
 uv run cfd-taichi benchmark naca_ns --arch cpu --steps 10 --sample-interval 5 --set ni=80 --set nj=24 --set ma=0.12 --set re=300.0 --set aoa=2.0 --payload-file naca_ns_summary.npy
@@ -80,6 +81,7 @@ uv run python examples/transonic_bump_sweep.py --sweep ma --values 0.62,0.66,0.7
 **正式 benchmark**
 
 - `lid_driven_cavity`
+- `flow_over_cylinder` / `cylinder`
 - `transonic_bump_euler` / `transonic_bump`
 - `cd_nozzle_euler` / `cd_nozzle`
 - `naca0012_euler` / `naca_euler`
@@ -104,7 +106,6 @@ uv run python examples/transonic_bump_sweep.py --sweep ma --values 0.62,0.66,0.7
 
 **下一批 benchmark 候選**
 
-- `flow_over_cylinder.py`：補齊 LBM bluff-body benchmark 主線
 - `sod_shock_tube.py`：補齊 compressible FV 最小 regression 基準
 - `backward_facing_step.py`：補齊分離/再附著與出口穩定性 benchmark
 - `taylor_green_vortex.py`：補齊週期邊界與耗散 regression benchmark
@@ -113,7 +114,8 @@ uv run python examples/transonic_bump_sweep.py --sweep ma --values 0.62,0.66,0.7
 
 - `transonic_bump_euler` acceptance 仍偏弱，尚未把 shock plateau / shock position 正式納入 registry gate
 - preset 目前是 Python API 與 example 薄包裝，尚未有對應的 `preset list/run` CLI
-- thermal / multiphase 路線仍停留在候選案例，尚未進入正式 benchmark surface
+- thermal 路線已先將 `rayleigh_benard` 接入 registry / matrix smoke；完整 Nu reference 長跑 gate 仍待補強
+- multiphase 路線仍停留在候選案例，尚未進入正式 benchmark surface
 
 ## 🗂️ Example Migration Status
 
@@ -122,6 +124,7 @@ uv run python examples/transonic_bump_sweep.py --sweep ma --values 0.62,0.66,0.7
 **保留並 toolkit 化**
 
 - `lid_driven_cavity.py`：已完成 toolkit 化，保留為 LBM 核心 benchmark。
+- `flow_over_cylinder.py`：已完成 toolkit 化，保留為 LBM bluff-body / force diagnostics benchmark。
 - `transonic_bump_euler.py`：已完成 toolkit 化，保留為 compressible FVM 核心 benchmark。
 - `cd_nozzle_euler.py`：已完成 toolkit 化，保留為 compressible FVM nozzle benchmark。
 - `poiseuille_flow_ns.py`：已完成 toolkit 化，保留為 incompressible FVM benchmark。
@@ -131,11 +134,10 @@ uv run python examples/transonic_bump_sweep.py --sweep ma --values 0.62,0.66,0.7
 - `naca0012_ns.py`：已完成 toolkit 化，保留為 viscous compressible FVM external-aero benchmark。
 - `naca0012_ns_sweep.py`：保留為 benchmark matrix preset 的後處理薄包裝，不再維持獨立逐點 workflow。
 - `transonic_bump_sweep.py`：保留為 benchmark matrix preset 的後處理薄包裝，不再維持獨立逐點 workflow。
-- `flow_over_cylinder.py`：LBM 經典 bluff-body 驗證，應作為下一批 toolkit benchmark 候選。
 - `backward_facing_step.py`：分離/再附著與 outlet 穩定性驗證具代表性，應納入 toolkit 路線。
 - `taylor_green_vortex.py`：週期邊界與耗散驗證價值高，適合作為 LBM regression benchmark。
 - `kelvin_helmholtz.py`：非定常剪切層基準，有研究價值，應保留。
-- `rayleigh_benard.py`：對 thermal LBM 有獨立驗證價值，若保留熱流路線，應 toolkit 化。
+- `rayleigh_benard.py`：已完成 thermal LBM toolkit 化，保留為 DDF+Boussinesq / Nu 診斷 benchmark；下一步是補長跑 reference acceptance。
 - `rayleigh_taylor_ch.py`：若 CH multiphase solver 要維持為正式能力，這是較合理的保留案例。
 - `rayleigh_taylor_ch_sweep.py`：保留前提是 `rayleigh_taylor_ch.py` 正式化；否則應跟著刪除。
 - `rayleigh_taylor_multiphase.py`：若 Shan-Chen multiphase 仍在 roadmap 內，保留並等待 toolkit 化。
@@ -209,6 +211,7 @@ runner.save_history_file("history.npy", params={"case": "demo"})
 runner.load_history("history.npy")
 
 ldc = create_benchmark_runner("lid_driven_cavity", res=64, re=100.0)
+cylinder = create_benchmark_runner("cylinder", res_y=48, re=100.0, u_in=0.05)
 bump = create_benchmark_runner("transonic_bump_euler", ni=80, nj=24, ma=0.70)
 nozzle = create_benchmark_runner("cd_nozzle", ni=48, nj=16, ma_init=0.12)
 naca = create_benchmark_runner("naca_euler", ni=80, nj=24, ma=0.3, aoa=5.0)
@@ -229,6 +232,12 @@ matrix = run_benchmark_matrix(
             steps=5,
             sample_interval=5,
             overrides={"ni": 80, "nj": 24, "ma": 0.70},
+        ),
+        BenchmarkMatrixEntry(
+            benchmark="flow_over_cylinder",
+            steps=5,
+            sample_interval=5,
+            overrides={"res_y": 48, "re": 100.0, "u_in": 0.05},
         ),
         BenchmarkMatrixEntry(
             benchmark="cd_nozzle_euler",

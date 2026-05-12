@@ -30,6 +30,7 @@ import numpy as np
 import argparse
 import time
 
+from cfd_taichi import CaseRunner, LatticeGrid2D
 from lbm_taichi.core import LBMSolver, BoundaryConditions
 from lbm_taichi.core.thermal_module import ThermalModule, ThermalBoundaryConditions
 
@@ -64,6 +65,266 @@ def compute_lbm_params(Ra: float, Pr: float, ny: int, u_ref: float):
     # 由 Ra = g·β·ΔT·H³/(nu·kappa) 反推，β·ΔT=1
     g_lbm = Ra * nu * kappa / (H ** 3)
     return nu, kappa, g_lbm, Re_eff, tau_f, tau_g
+
+
+def _validate_rayleigh_benard_params(
+    *,
+    ny: int,
+    Ra: float,
+    Pr: float,
+    u_ref: float,
+    aspect: float,
+):
+    """
+    驗證 Rayleigh-Bénard toolkit runner 的物理與數值前提。
+
+    What: 檢查網格、Ra/Pr、Mach 與 LBM 鬆弛時間。
+    Why:  thermal benchmark 若參數落在不穩定區，應 fail fast，而不是產生看似可用的場。
+    """
+    if ny < 4:
+        raise ValueError(f"ny must be >= 4 for wall-gradient Nusselt diagnostics, got {ny}")
+    if Ra <= 0.0:
+        raise ValueError(f"Ra must be positive, got {Ra}")
+    if Pr <= 0.0:
+        raise ValueError(f"Pr must be positive, got {Pr}")
+    if u_ref <= 0.0:
+        raise ValueError(f"u_ref must be positive, got {u_ref}")
+    if aspect <= 0.0:
+        raise ValueError(f"aspect must be positive, got {aspect}")
+
+    _nu, _kappa, _g_lbm, _re_eff, tau_f, tau_g = compute_lbm_params(Ra, Pr, ny, u_ref)
+    if tau_f < 0.505:
+        raise ValueError(
+            f"tau_f={tau_f:.4f} 過小（< 0.505）。請降低 u_ref 或增大 ny。"
+        )
+    if tau_g < 0.505:
+        raise ValueError(
+            f"tau_g={tau_g:.4f} 過小（< 0.505）。請降低 u_ref 或提高 Pr。"
+        )
+    if u_ref * 1.732 > 0.3:
+        raise ValueError(
+            f"Ma={u_ref * 1.732:.3f} 超過 low-Mach Boussinesq 建議上限 0.3。"
+        )
+
+
+def _reset_solver_to_rest(solver: LBMSolver):
+    """
+    將 LBM 主分佈重設為 rho=1、u=0 的平衡態。
+
+    Why: LBMSolver 預設較偏向入口流案例；Rayleigh-Bénard 應由靜止導熱態觸發。
+    """
+    weights = np.array([4 / 9, 1 / 9, 1 / 9, 1 / 9, 1 / 9, 1 / 36, 1 / 36, 1 / 36, 1 / 36],
+                       dtype=np.float32)
+    f0 = np.zeros((solver.nx_g, solver.ny_g, 9), dtype=np.float32)
+    for k in range(9):
+        f0[:, :, k] = weights[k]
+    solver.f.from_numpy(f0)
+    solver.f_new.from_numpy(f0)
+    solver.u.fill(0.0)
+
+
+def _add_rayleigh_benard_temperature_perturbation(
+    thermal: ThermalModule,
+    *,
+    amplitude: float,
+):
+    """
+    加入符合左右絕熱壁的 cos-sin 溫度擾動。
+
+    Why: 線性導熱態在 x 方向均勻，需要可控擾動觸發自然對流模態。
+    """
+    if amplitude == 0.0:
+        return
+
+    nx = thermal.nx
+    ny = thermal.ny
+    g_np = thermal.g.to_numpy()
+    w_np = thermal.w.to_numpy()
+    x = np.arange(1, nx + 1, dtype=np.float32)
+    y = np.arange(1, ny + 1, dtype=np.float32)
+    xx, yy = np.meshgrid(x, y, indexing="ij")
+    perturbation = amplitude * np.cos(2.0 * np.pi * xx / nx) * np.sin(np.pi * yy / ny)
+    for k in range(9):
+        g_np[1:nx + 1, 1:ny + 1, k] += (w_np[k] * perturbation).astype(np.float32)
+    thermal.g.from_numpy(g_np)
+    thermal.g_new.from_numpy(g_np)
+
+
+def _initialize_rayleigh_benard_case(
+    runner: CaseRunner,
+    solver: LBMSolver,
+    _bc_handle,
+    *,
+    Ra: float,
+    Pr: float,
+    g_lbm: float,
+    perturbation: float,
+):
+    """
+    Rayleigh-Bénard CaseRunner 初始化流程。
+
+    What: 建立靜止流場、DDF 熱場、Boussinesq 浮力與熱邊界條件。
+    Why: toolkit runner 必須能自洽重建 standalone 腳本的物理設定。
+    """
+    _reset_solver_to_rest(solver)
+
+    thermal = ThermalModule(solver, Pr=Pr, beta=1.0, g_gravity=g_lbm, T_ref=0.5)
+    thermal.init_temperature(T_bot=1.0, T_top=0.0)
+    _add_rayleigh_benard_temperature_perturbation(thermal, amplitude=perturbation)
+    thermal.register_with_solver()
+
+    tbc = ThermalBoundaryConditions(thermal)
+    tbc.add_hot_wall(T_hot=1.0, location="bottom")
+    tbc.add_cold_wall(T_cold=0.0, location="top")
+    tbc.add_adiabatic_wall(location="left")
+    tbc.add_adiabatic_wall(location="right")
+    tbc.apply(thermal.g)
+    tbc.apply(thermal.g_new)
+
+    runner.thermal = thermal
+    runner.thermal_bc = tbc
+    runner.rb_params = {"Ra": float(Ra), "Pr": float(Pr)}
+
+    solver.apply_boundary_conditions(solver.f)
+    solver.apply_boundary_conditions(solver.f_new)
+    runner.prepare_observables(reset_baseline=True)
+
+
+def _rayleigh_benard_stepper(runner: CaseRunner, next_step: int):
+    """
+    推進一個 coupled LBM thermal step。
+
+    Why: CaseRunner 的預設 LBM step 只處理 f 分佈；Rayleigh-Bénard 需要同步推進 g 分佈。
+    """
+    solver = runner.solver
+    thermal = runner.thermal
+    tbc = runner.thermal_bc
+
+    f_src = solver.f if next_step % 2 == 1 else solver.f_new
+    f_dst = solver.f_new if next_step % 2 == 1 else solver.f
+    g_src = thermal.g if next_step % 2 == 1 else thermal.g_new
+    g_dst = thermal.g_new if next_step % 2 == 1 else thermal.g
+
+    thermal._update_temperature(g_src)
+    solver.step(f_src, f_dst)
+    thermal.step(g_src, g_dst)
+    tbc.apply(g_dst)
+    return None
+
+
+def _rayleigh_benard_diagnostics_hook(
+    runner: CaseRunner,
+    solver: LBMSolver,
+    diagnostics: dict,
+) -> dict:
+    """
+    補充 thermal benchmark 專屬診斷量。
+    """
+    thermal = getattr(runner, "thermal", None)
+    if thermal is None:
+        return {}
+    g_active = thermal.g_new if runner.current_step % 2 == 1 else thermal.g
+    thermal._update_temperature(g_active)
+    T_np = thermal.T.to_numpy()[1:thermal.nx + 1, 1:thermal.ny + 1]
+    nusselt = thermal.get_nusselt(T_bot=1.0, T_top=0.0)
+    u_max = float(diagnostics.get("u_max", diagnostics.get("max_u", np.nan)))
+    return {
+        "u_max": u_max,
+        "cfl": u_max,
+        "nusselt": float(nusselt),
+        "temperature_mid": float(T_np[thermal.nx // 2, thermal.ny // 2]),
+        "temperature_min": float(np.min(T_np)),
+        "temperature_max": float(np.max(T_np)),
+        "Ra": float(runner.rb_params["Ra"]),
+        "Pr": float(runner.rb_params["Pr"]),
+    }
+
+
+def _rayleigh_benard_state_hook(
+    runner: CaseRunner,
+    _solver: LBMSolver,
+    _payload: dict,
+) -> dict:
+    """
+    將溫度場與 RB 參數加入標準 state payload。
+    """
+    thermal = runner.thermal
+    g_active = thermal.g_new if runner.current_step % 2 == 1 else thermal.g
+    thermal._update_temperature(g_active)
+    return {
+        "temperature": thermal.T.to_numpy()[1:thermal.nx + 1, 1:thermal.ny + 1],
+        "Ra": float(runner.rb_params["Ra"]),
+        "Pr": float(runner.rb_params["Pr"]),
+    }
+
+
+def build_rayleigh_benard_runner(
+    *,
+    ny: int = 64,
+    Ra: float = 1e5,
+    Pr: float = 0.71,
+    u_ref: float = 0.1,
+    aspect: float = 2.0,
+    perturbation: float = 0.01,
+    collision_model: str = "mrt",
+) -> tuple[CaseRunner, dict]:
+    """
+    建立 Rayleigh-Bénard 對流的 CaseRunner。
+
+    What: 將封閉腔體 RB 的 LBM solver、熱場、熱邊界與 Nu 診斷接入 toolkit workflow。
+    Why: thermal route 需要 registry/matrix 可重跑能力，而不是只依賴 standalone script。
+    """
+    _validate_rayleigh_benard_params(
+        ny=ny,
+        Ra=Ra,
+        Pr=Pr,
+        u_ref=u_ref,
+        aspect=aspect,
+    )
+    nx = int(aspect * ny)
+    if nx < 4:
+        raise ValueError(f"aspect * ny must produce nx >= 4, got nx={nx}")
+
+    _nu, kappa, g_lbm, Re_eff, tau_f, tau_g = compute_lbm_params(Ra, Pr, ny, u_ref)
+    runner = CaseRunner(
+        name="rayleigh_benard",
+        method="lbm",
+        equation="thermal_boussinesq",
+        regime="low_mach",
+        grid=LatticeGrid2D(nx=nx, ny=ny),
+        solver_kwargs={
+            "re": Re_eff,
+            "u_ref": u_ref,
+            "length_scale": float(ny),
+            "cs": 0.0,
+            "collision_model": collision_model,
+        },
+        initializer=lambda runner_obj, solver_obj, bc_handle: _initialize_rayleigh_benard_case(
+            runner_obj,
+            solver_obj,
+            bc_handle,
+            Ra=Ra,
+            Pr=Pr,
+            g_lbm=g_lbm,
+            perturbation=perturbation,
+        ),
+        stepper=_rayleigh_benard_stepper,
+        diagnostics_hook=_rayleigh_benard_diagnostics_hook,
+        state_hook=_rayleigh_benard_state_hook,
+    )
+    setup = {
+        "nx": nx,
+        "ny": int(ny),
+        "Ra": float(Ra),
+        "Pr": float(Pr),
+        "Re_eff": float(Re_eff),
+        "kappa": float(kappa),
+        "g_lbm": float(g_lbm),
+        "tau_f": float(tau_f),
+        "tau_g": float(tau_g),
+        "perturbation": float(perturbation),
+    }
+    return runner, setup
 
 
 def run_rayleigh_benard(
