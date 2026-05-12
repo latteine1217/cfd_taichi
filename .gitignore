@@ -41,6 +41,9 @@ GEMINI.md
 # Git worktrees
 .worktrees/
 
+# Superpowers workflow plans (個人計畫暫存；長期設計仍寫入 docs/superpowers/specs/)
+docs/superpowers/plans/
+
 # 本機旁支工作區 / 外部子專案
 ocean-physics/
 
